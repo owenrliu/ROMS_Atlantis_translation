@@ -1,0 +1,14 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+#spatial data
+*.shp
+*.prj
+*.dbf
+*.shx
+*.grd
+*.gri
+
+#big netCDF data
+*.nc

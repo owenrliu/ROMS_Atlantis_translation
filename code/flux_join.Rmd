@@ -1,0 +1,154 @@
+---
+title: "Join ROMS Fluxes"
+author: "Owen Liu"
+date: "12/21/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(raster)
+library(tidyverse)
+library(sf)
+library(here)
+library(tidync)
+
+```
+
+# Purpose
+
+Join ROMS data to Atlantis, specifically the data that are fluxes or flows. These need to be tranlsated from the ROMS box/raster structure into the Atlantis polygon format by calculating fluxes across polygon faces.
+
+The idea is to find the ROMS boxes that the polygon faces (edges/lines) cross, and then use those to calculate fluxes
+
+# Import data
+Import an example ROMS file and the California Current Atlantis polygons
+From Mike Jacox 12/28/20 - 
+*The larger one is a sample of what the ROMS output looks like, with all variables (only physics in this example, no biogeochemistry). The other file has the depths that go with the 3D variables. At this stage I think you'll be most interested in temp, salinity, and currents. Variable names (and associated dimensions) for those are: temp (rho) salt (rho) u (u) v (v) w (w)*
+
+```{r}
+roms <- tidync(here::here('data','roms','wc12_ccsra31_his_month_avg_1981_2010_Jan.nc'))
+roms2 <- tidync(here::here('data','roms','ccsra_depths_sample.nc'))
+
+```
+
+```{r}
+#Atlantis geometry
+atlantis <- read_sf(here('data','atlantis','emocc_112720.shp'))
+plot(atlantis['label'])
+glimpse(atlantis)
+
+# what's the area of the boxes?
+box_areas <- tibble(box=0:88,area_m2= atlantis %>% st_area() %>% as.numeric()) %>% mutate(area_km2=area_m2/1e6 %>% as.numeric())
+
+box_areas %>%
+  mutate(category=case_when(
+    area_km2<300 ~ "Less than 300",
+    area_km2>=300&area_km2<500 ~ "Less than 500",
+    area_km2>=500&area_km2<10000 ~ "Less than 10,000",
+    area_km2>=10000 ~ "Greater than 10,000",
+  )) %>% 
+  mutate(category=factor(category,levels=c("Less than 300","Less than 500","Less than 10,000","Greater than 10,000"))) %>% 
+  group_by(category) %>% 
+  summarise(numboxes=n()) %>% 
+  ungroup() %>% 
+  ggplot(aes(category,numboxes))+
+  geom_col()+
+    theme_minimal()+
+  labs(x="Area (sq. km)",y="Number of Atlantis Boxes",title="California Current Atlantis Polygon Areas")
+```
+
+```{r}
+# raster version of atlantis grid
+atlantis_ll <- atlantis %>% st_transform(4326) %>% mutate(area_km2=area/1e6) %>% dplyr::select(-area)
+st_write(atlantis_ll,here::here('data','atlantis','emocc_ll.shp'),delete_dsn = T)
+atlantis_ll_r <- atlantis_ll %>% fasterize::fasterize(raster=raster::raster(resolution=0.1),field="box_id") %>% 
+  raster::crop(extent(atlantis_ll))
+plot(atlantis_ll_r)
+writeRaster(atlantis_ll_r,here::here('data','atlantis','emocc_raster.grd'),overwrite=T)
+```
+
+
+# Convert Raster to Points
+
+```{r}
+oxy_pts <- oxy %>% rasterToPoints() %>%
+  as_tibble() %>% 
+  rename(oxybot=layer) %>% 
+  st_as_sf(coords=c('x','y'),crs=4326) %>% 
+  # convert to same crs as atlantis
+  st_transform(st_crs(atlantis)) %>% 
+  st_crop(st_bbox(atlantis)) %>% 
+  mutate(cellNum=row_number())
+```
+
+# Example Calculation
+
+Get a matrix of neighboring polygons
+
+```{r}
+# poly_neighbors <- st_relate(atlantis, pattern = "****1****")
+```
+
+Take one of the Atlantis polygons, find its edges, and find the closest raster cells to its edges
+
+```{r}
+box55 <- atlantis %>% filter(label=="Box55")
+box55 %>% ggplot()+geom_sf()
+
+# split into faces (hacky...)
+box55_faces <- box55 %>% st_cast("POINT") %>% 
+  mutate(pt=row_number()) %>% 
+  slice(1,rep(2:(n()-1),each=2),n()) %>% 
+  # line segment identifier, such that the segment for each VMS point is composed of its own point and the next point
+  mutate(face=lag(pt,1)) %>% replace_na(list(face=1)) %>% 
+  # build the lines
+  group_by(face) %>% 
+  summarise() %>% 
+  st_cast('LINESTRING') %>% 
+  ungroup()
+box55_faces
+ggplot(box55_faces)+geom_sf()+geom_sf_text(aes(label=face))
+#just the boundary
+# box55 %>% st_boundary()
+
+# and with its neighbors
+# box55 <- atlantis %>% filter(box_id %in% poly_neighbors[[55]])
+# box55 %>% ggplot()+geom_sf()+geom_sf_label(aes(label=box_id))
+# 
+# box75 <- atlantis %>% filter(box_id %in% poly_neighbors[[75]])
+# box75 %>% ggplot()+geom_sf()+geom_sf_label(aes(label=box_id))
+
+```
+
+We have the faces of a polygon now. Now, for each face, we want to find the raster/ROMS cells closest to it, then calculate a flux at the right angle.
+
+```{r}
+box55_buff <- st_buffer(box55_faces,10000) #10,000 m= 10km
+box55_buff %>% ggplot()+geom_sf()
+
+# intersect the ROMS points to the polygon buffer
+box55_roms_intersect <- box55_buff %>% st_join(oxy_pts,join=st_contains)
+glimpse(box55_roms_intersect)
+# here's an example of a face with its joined roms points
+box55_face1 <- box55_roms_intersect %>% filter(face==1)
+box55_face1 %>% ggplot()+geom_sf()+geom_sf(data=oxy_pts %>% filter(cellNum %in% box55_face1$cellNum))
+
+process_face <- function(polyface){
+  
+}
+
+# calculate angle of the face
+calc_angle <- function(l) {
+  x<- l['X']
+  y<- l['Y']
+  atan((y[2]-y[1])/(x[2]-x[1]))
+}
+box55_angle <- box55_faces %>% filter(face==1) %>% 
+  st_transform(4326) %>% 
+  st_coordinates() %>% .[,c("X","Y")] %>%  geosphere::bearing()
+```
+
+
+
+
