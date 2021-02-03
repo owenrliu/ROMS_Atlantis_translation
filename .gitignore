@@ -2,6 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+*.zip
 #spatial data
 *.shp
 *.prj
