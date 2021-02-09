@@ -12,14 +12,25 @@ library(tidyverse)
 library(sf)
 library(here)
 library(tidync)
+library(rbgm)
+library(viridis)
+```
 
+```{r,echo=F,include=F}
+select <- dplyr::select
+here <- here::here
+options(dplyr.summarise.inform=FALSE)
 ```
 
 # Purpose
 
-Join ROMS data to Atlantis, specifically the data that are fluxes or flows. These need to be tranlsated from the ROMS box/raster structure into the Atlantis polygon format by calculating fluxes across polygon faces.
+Join ROMS data to Atlantis. These need to be tranlsated from the ROMS grid structure into the Atlantis polygon format by calculating fluxes across polygon faces.
 
-The idea is to find the ROMS boxes that the polygon faces (edges/lines) cross, and then use those to calculate fluxes
+For static variables like salinity and temperature, these need to be summarized across the ROMS points within in each Atlantis polygon.
+
+This is all in 3 dimensions, i.e., we need to match the two grids together by x, y, and z coordinates.
+
+AFAIK, ROMS grids have consistent x and y coordinates, but the z for each timestep can vary. To try to reduce computing time, we will only match the x and y coordinates between Atlantis and ROMS once, while allowing for ROMS depth (and, by extension, the matched ROMS/Atlantis depths) to vary.
 
 # Import data
 Import an example ROMS file and the California Current Atlantis polygons
@@ -27,128 +38,598 @@ From Mike Jacox 12/28/20 -
 *The larger one is a sample of what the ROMS output looks like, with all variables (only physics in this example, no biogeochemistry). The other file has the depths that go with the 3D variables. At this stage I think you'll be most interested in temp, salinity, and currents. Variable names (and associated dimensions) for those are: temp (rho) salt (rho) u (u) v (v) w (w)*
 
 ```{r}
-roms <- tidync(here::here('data','roms','wc12_ccsra31_his_month_avg_1981_2010_Jan.nc'))
-roms2 <- tidync(here::here('data','roms','ccsra_depths_sample.nc'))
-
+romsfile <- here::here('data','roms','wc12_ccsra31_his_month_avg_1981_2010_Jan.nc')
+roms <- tidync(romsfile)
+romsfile2 <- here::here('data','roms','ccsra_depths_sample.nc')
+roms2 <- tidync(romsfile2)
 ```
 
-```{r}
-#Atlantis geometry
-atlantis <- read_sf(here('data','atlantis','emocc_112720.shp'))
-plot(atlantis['label'])
-glimpse(atlantis)
+For sanity, here are the ROMS variables and grids from the main netCDF
 
+```{r}
+roms_vars <- hyper_grids(roms) %>% # all available grids in the ROMS ncdf
+  pluck("grid") %>% # for each grid, pull out all the variables asssociated with that grid and make a reference table
+  purrr::map_df(function(x){
+    roms %>% activate(x) %>% hyper_vars() %>% 
+      mutate(grd=x)
+  })
+# first 10 rows
+roms_vars %>% slice(1:10) %>% knitr::kable()
+```
+
+and if we want, for the depths ncdf
+```{r}
+roms2_vars <- hyper_grids(roms2) %>% # all available grids in the ROMS ncdf
+  pluck("grid") %>% # for each grid, pull out all the variables asssociated with that grid and make a reference table
+  purrr::map_df(function(x){
+    roms2 %>% activate(x) %>% hyper_vars() %>% 
+      mutate(grd=x)
+  })
+```
+
+
+```{r}
+# Boundary geometry file from Atlantis
+atlantis_bgm <- read_bgm(here('data','atlantis','CalCurrentV3_utm.bgm'))
+#Atlantis geometry as an sf shapefile
+atlantis_sf <- atlantis_bgm %>% box_sf()
+ggplot(atlantis_sf)+
+  geom_sf(aes(fill=box_id))+
+  theme_minimal()
+# plot(atlantis_sf['box_id'])
+glimpse(atlantis_sf)
+```
+
+```{r, include=F,echo=F}
 # what's the area of the boxes?
-box_areas <- tibble(box=0:88,area_m2= atlantis %>% st_area() %>% as.numeric()) %>% mutate(area_km2=area_m2/1e6 %>% as.numeric())
-
-box_areas %>%
-  mutate(category=case_when(
-    area_km2<300 ~ "Less than 300",
-    area_km2>=300&area_km2<500 ~ "Less than 500",
-    area_km2>=500&area_km2<10000 ~ "Less than 10,000",
-    area_km2>=10000 ~ "Greater than 10,000",
-  )) %>% 
-  mutate(category=factor(category,levels=c("Less than 300","Less than 500","Less than 10,000","Greater than 10,000"))) %>% 
-  group_by(category) %>% 
-  summarise(numboxes=n()) %>% 
-  ungroup() %>% 
-  ggplot(aes(category,numboxes))+
-  geom_col()+
-    theme_minimal()+
-  labs(x="Area (sq. km)",y="Number of Atlantis Boxes",title="California Current Atlantis Polygon Areas")
-```
-
-```{r}
-# raster version of atlantis grid
-atlantis_ll <- atlantis %>% st_transform(4326) %>% mutate(area_km2=area/1e6) %>% dplyr::select(-area)
-st_write(atlantis_ll,here::here('data','atlantis','emocc_ll.shp'),delete_dsn = T)
-atlantis_ll_r <- atlantis_ll %>% fasterize::fasterize(raster=raster::raster(resolution=0.1),field="box_id") %>% 
-  raster::crop(extent(atlantis_ll))
-plot(atlantis_ll_r)
-writeRaster(atlantis_ll_r,here::here('data','atlantis','emocc_raster.grd'),overwrite=T)
-```
-
-
-# Convert Raster to Points
-
-```{r}
-oxy_pts <- oxy %>% rasterToPoints() %>%
-  as_tibble() %>% 
-  rename(oxybot=layer) %>% 
-  st_as_sf(coords=c('x','y'),crs=4326) %>% 
-  # convert to same crs as atlantis
-  st_transform(st_crs(atlantis)) %>% 
-  st_crop(st_bbox(atlantis)) %>% 
-  mutate(cellNum=row_number())
-```
-
-# Example Calculation
-
-Get a matrix of neighboring polygons
-
-```{r}
-# poly_neighbors <- st_relate(atlantis, pattern = "****1****")
-```
-
-Take one of the Atlantis polygons, find its edges, and find the closest raster cells to its edges
-
-```{r}
-box55 <- atlantis %>% filter(label=="Box55")
-box55 %>% ggplot()+geom_sf()
-
-# split into faces (hacky...)
-box55_faces <- box55 %>% st_cast("POINT") %>% 
-  mutate(pt=row_number()) %>% 
-  slice(1,rep(2:(n()-1),each=2),n()) %>% 
-  # line segment identifier, such that the segment for each VMS point is composed of its own point and the next point
-  mutate(face=lag(pt,1)) %>% replace_na(list(face=1)) %>% 
-  # build the lines
-  group_by(face) %>% 
-  summarise() %>% 
-  st_cast('LINESTRING') %>% 
-  ungroup()
-box55_faces
-ggplot(box55_faces)+geom_sf()+geom_sf_text(aes(label=face))
-#just the boundary
-# box55 %>% st_boundary()
-
-# and with its neighbors
-# box55 <- atlantis %>% filter(box_id %in% poly_neighbors[[55]])
-# box55 %>% ggplot()+geom_sf()+geom_sf_label(aes(label=box_id))
+# box_areas <- tibble(box=0:88,area_m2= atlantis %>% st_area() %>% as.numeric()) %>% mutate(area_km2=area_m2/1e6 %>% as.numeric())
 # 
-# box75 <- atlantis %>% filter(box_id %in% poly_neighbors[[75]])
-# box75 %>% ggplot()+geom_sf()+geom_sf_label(aes(label=box_id))
-
+# box_areas %>%
+#   mutate(category=case_when(
+#     area_km2<300 ~ "Less than 300",
+#     area_km2>=300&area_km2<500 ~ "Less than 500",
+#     area_km2>=500&area_km2<10000 ~ "Less than 10,000",
+#     area_km2>=10000 ~ "Greater than 10,000",
+#   )) %>% 
+#   mutate(category=factor(category,levels=c("Less than 300","Less than 500","Less than 10,000","Greater than 10,000"))) %>% 
+#   group_by(category) %>% 
+#   summarise(numboxes=n()) %>% 
+#   ungroup() %>% 
+#   ggplot(aes(category,numboxes))+
+#   geom_col()+
+#     theme_minimal()+
+#   labs(x="Area (sq. km)",y="Number of Atlantis Boxes",title="California Current Atlantis Polygon Areas")
 ```
 
-We have the faces of a polygon now. Now, for each face, we want to find the raster/ROMS cells closest to it, then calculate a flux at the right angle.
+# ROMS grids
+
+Find and extract the rho-points, u and v points, and cell depths for our ROMS grid. We add indexing numbers to match tables later. Graphic [here](https://www.myroms.org/wiki/Grid_Generation)
+
+*  $\rho$ has $(\xi,\eta)$ dimensions 186 and 181, respectively
+*  $u$ has $(\xi,\eta)$ dimensions 185 and 181, respectively
+*  $v$ has $(\xi,\eta)$ dimensions 186 and 180, respectively
+
+So, the closest rho points to u(x,y) are rho(x,y) and rho(x+1,y)
+The closest rho points to v(x,y) are rho(x,y) and rho(x,y+1)
 
 ```{r}
-box55_buff <- st_buffer(box55_faces,10000) #10,000 m= 10km
-box55_buff %>% ggplot()+geom_sf()
+# cell lat/lons and depths from ROMS
+rho_grd <- roms_vars %>% filter(name=="h") %>% pluck('grd')
+roms_rho <- roms %>% activate(rho_grd) %>% hyper_tibble() %>% 
+  select(lat_rho,lon_rho,xi_rho,eta_rho,h)
 
-# intersect the ROMS points to the polygon buffer
-box55_roms_intersect <- box55_buff %>% st_join(oxy_pts,join=st_contains)
-glimpse(box55_roms_intersect)
-# here's an example of a face with its joined roms points
-box55_face1 <- box55_roms_intersect %>% filter(face==1)
-box55_face1 %>% ggplot()+geom_sf()+geom_sf(data=oxy_pts %>% filter(cellNum %in% box55_face1$cellNum))
+# s_rho
+s_rho_grd <- roms_vars %>% filter(name=="s_rho") %>% pluck('grd')
+s_rho <- roms %>% activate(s_rho_grd) %>% hyper_tibble()
+## Cs_r is the S-coord stretching (length is num layers from -1 to 0 describing what portion of the w.c. each layer spans)
+## We pull the Cs_r values from the roms ncdf
+## one Cs_r value per s-coordinate
+Cs_r <- s_rho %>% pluck('Cs_r')
 
-process_face <- function(polyface){
-  
-}
+# h and Cs_r
+h_grd <- roms_vars %>% filter(name=="h") %>% pluck('grd')
+h <- roms %>% activate(h_grd) %>% hyper_tibble() %>% select(xi_rho,eta_rho,h)
 
-# calculate angle of the face
-calc_angle <- function(l) {
-  x<- l['X']
-  y<- l['Y']
-  atan((y[2]-y[1])/(x[2]-x[1]))
-}
-box55_angle <- box55_faces %>% filter(face==1) %>% 
-  st_transform(4326) %>% 
-  st_coordinates() %>% .[,c("X","Y")] %>%  geosphere::bearing()
+# find appropriate ROMS ncdf grid for the rho points
+latlon_rhogrd <- roms_vars %>% filter(name=="lat_rho") %>% pluck('grd')
+# pull the lon/lats
+roms_rho <- roms %>% activate(latlon_rhogrd) %>% hyper_tibble() %>% select(lon_rho,lat_rho,xi_rho,eta_rho) %>% 
+  mutate(rhoidx=row_number()) # add index
+```
+
+The "rho" points depths are the vertical center of the cells (or layers). The interfaces are at the "w" points. Hence there are N rho-points and N+1 w-points. The bottom of the bottom-most layer is z=-h, and therefore the z-center of the bottom-most layer is above this. Likewise, the top of the top-most layer is z=0 (actually z=zeta) so the z-center is below this. See [image](https://www.myroms.org/wiki/images/4/41/vertical_grid.png)
+
+```{r}
+#s_w?
+s_w_grd <- roms_vars %>% filter(name=="s_w") %>% pluck('grd')
+s_w <- roms %>% activate(s_w_grd) %>% hyper_tibble()
+Cs_w <- s_w %>% pluck('Cs_w')
 ```
 
 
+```{r}
+# u and v grids from ROMS data
+latlon_ugrd <-roms_vars %>% filter(name=="lat_u") %>% pluck('grd')
+latlon_vgrd <-roms_vars %>% filter(name=="lat_v") %>% pluck('grd')
 
+# pull the lon/lats
+roms_u <- roms %>% activate(latlon_ugrd) %>% hyper_tibble() %>% select(lon_u,lat_u,xi_u,eta_u)
+roms_v <- roms %>% activate(latlon_vgrd) %>% hyper_tibble() %>% select(lon_v,lat_v,xi_v,eta_v)
+```
+
+For distance calculations and spatial mapping, we want to convert lat/lon coordinates to the same coordinate reference system that is used to represent the Atlantis boxes. We do this using the `sf` package, adding the converted XY coordinates to the indices we just created.
+
+```{r}
+append_xy_coords <- function(lonlatdat,xyproj=atlantis_bgm$extra$projection,lon_col="lon_rho",lat_col="lat_rho"){
+  lonlatdat %>% 
+    st_as_sf(coords=c(lon_col,lat_col),crs=4326,remove=F) %>%  # convert to spatial object
+    st_transform(xyproj) %>%  # convert to Atlantis coords
+    mutate(x = st_coordinates(.)[,1],
+           y = st_coordinates(.)[,2]) # grab x and y coordinates and add them as attributes
+}
+
+rhoxy<- append_xy_coords(roms_rho,lon_col="lon_rho",lat_col="lat_rho") %>% mutate(rhoidx=row_number())
+uxy <- append_xy_coords(roms_u,lon_col="lon_u",lat_col="lat_u")%>% mutate(uidx=row_number())
+vxy <- append_xy_coords(roms_v,lon_col="lon_v",lat_col="lat_v")%>% mutate(vidx=row_number())
+```
+
+
+```{r, include=F}
+# Returns a ramp of positive depths from the surface down (makes the order native to NetCDF order)
+# roms_level <- function(Cs_r, h, cell) {
+#   raster::extract(h, cell) *  Cs_r
+# }
+# 
+# # matching cell for the right group
+# extract_at_level <- function(x, cell_level) {
+#   ulevel <- unique(cell_level$level)
+#   values <- numeric(nrow(cell_level))
+#   for (ul in seq_along(ulevel)) {
+#     asub <- cell_level$level == ulevel[ul]
+#     values[asub] <- raster::extract(x[[ulevel[ul]]], 
+#                             cell_level$cell[asub])
+#   }
+#   values
+# }
+# 
+# # Obtain lat/lon for rho-points
+# roms_ll_rho<- angstroms::romscoords(paste0(roms.dir,roms.files[[1]]), transpose = TRUE, spatial = c("lon_rho", "lat_rho"))
+# # Rotate longitude from (0-,360) to (-180,180 )
+# roms_ll_rho$longitude.of.RHO.points = ((roms_ll_rho$longitude.of.RHO.points+180) %% 360) - 180
+# # extent(roms_ll_rho) = c(-180,180,0,161)
+# # obtain find nearest-neighbor of bgm faces on ROMS grid
+# roms_face_rho <- angstroms::romsmap(project_to(rbgm::faceSpatial(bgm), "+init=epsg:4326"), roms_ll_rho)
+```
+
+
+# Faces and Angles
+
+Extract faces of each polygon from Atlantis and organize them
+
+```{r}
+# information about each face, including its angular coords, and which boxes are to its left and right
+faces <- atlantis_bgm$faces %>% select(-label)
+glimpse(faces)
+
+faces_sf <- atlantis_bgm %>% face_sf() %>% 
+  # join attribute data
+  left_join(faces,by=c('label'='.fx0')) %>% 
+  rename(.fx0=label)
+```
+
+The `faces` table has the sine and cosine of each face, its length in meters, and which Atlantis box is to its left and right
+
+# Match ROMS to Faces
+
+Find all the rho, u, and v points within a buffer around each face, and build an index. For this step, we assume that the linear unit of the distance calculation is meters. We build a rounded buffer of **10 km** (`dist=10000`) around each face and then find all rho, u, and v points that fall within that buffer. If the Atlantis spatial representation is not in meters, adjust the `dist` argument accordingly.
+
+```{r}
+faces_buffer <- st_buffer(faces_sf,dist=10000)
+# join rho points
+faces_rho_join <- faces_buffer %>% st_join(rhoxy)
+# join u points
+faces_u_join <- faces_buffer %>% st_join(uxy)
+# join v points
+faces_v_join <- faces_buffer %>% st_join(vxy)
+```
+
+Example map of what this means spatially
+
+```{r}
+set.seed(413)
+tfaceidx <- sample(faces_v_join$.fx0,1)
+tvidx <- faces_v_join %>% filter(.fx0==tfaceidx) %>% pluck('vidx')
+tbuff <- faces_v_join %>% 
+  filter(.fx0==tfaceidx) %>% 
+  sample_n(1) # example face
+tface <- faces_sf %>% 
+  filter(.fx0==unique(tbuff$.fx0))
+tbbox <- st_bbox(tbuff)
+tv <- vxy %>% 
+  filter(vidx %in% tvidx)
+ggplot()+
+  # geom_sf(data=atlantis_sf,fill="blue")+
+  geom_sf(data=tbuff,fill=NA)+
+  geom_sf(data=tface,col='black',size=1.5)+
+  geom_sf(data=tv,col='red')+
+  coord_sf(xlim=c(tbbox[1],tbbox[3]),ylim=c(tbbox[2],tbbox[4]))+
+  labs(title=paste("v Points for\nFace Between Box",unique(tbuff$left),"and Box",unique(tbuff$right)))
+rm(tbuff,tbbox,tface,tvidx,tfaceidx)
+```
+
+# Match ROMS to Boxes
+
+In order to match depth layers between ROMS and Atlantis, we want to determine which Atlantis box each ROMS grid point is in (if any).
+
+```{r}
+boxes_rho_join <- atlantis_sf %>% st_join(rhoxy)
+# join u points
+boxes_u_join <- atlantis_sf %>% st_join(uxy) %>% select(.bx0,uidx) %>% st_set_geometry(NULL)
+# join v points
+boxes_v_join <- atlantis_sf %>% st_join(vxy) %>% select(.bx0,vidx) %>% st_set_geometry(NULL)
+```
+
+## Empty Boxes
+
+Which boxes don't have ROMS points?
+
+```{r}
+empty_boxes<- boxes_rho_join %>% 
+  st_set_geometry(NULL) %>% 
+  filter(is.na(rhoidx)) %>% 
+  select(box_id) %>% 
+  distinct()
+paste0("Atlantis boxes with no ROMS points are boxes ",paste(empty_boxes$box_id,collapse = ","))
+```
+
+# Dealing with Depth
+
+We need to match Atlantis box depth layers to the appropriate depths from ROMS. We need to use the thickness of depths layers *specific to this Atlantis model*, because not all Atlantis models have the same total number of depth layers.
+
+First, construct Atlantis depths. In the CalCurrent Atlantis, each box can have a maximum of 7 depth layers, where the 7th layer is 1m thick and represents the sediment. The rest of the depth layers start with layer 6 being the shallowest, then 5, 4, etc.
+
+## Atlantis Depths
+
+
+```{r}
+# IMPORTANT: what are your Atlantis depth layer thicknesses? As a vector starting from the deepest layer
+atlantis_z <- c(-1200,-650,-350,-100,-50,-50,0)
+```
+
+```{r,echo=F}
+tibble(dz=rev(c(atlantis_z,-1)),lyr=8:1) %>% 
+  ggplot(aes(dz,x=1,fill=factor(lyr)))+
+  geom_col(col='black')+
+  scale_fill_brewer(palette="PuBu",direction = -1,guide="none")+
+  labs(x="",y="Depth",fill="",title="Atlantis Depth Layers")+
+  theme_minimal()+
+  theme(axis.text.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor=element_blank())
+```
+
+
+```{r}
+# small function to build enough depth layers for each box, starting with the defined layers above
+# in this function, botz is the bottom depth given for each box, which is available in the .bgm file 
+build_Atlantis_depths <- function(botz,lyrs){
+  # bottom of each layer, starting from deepest
+  lyrbot<-rev(cumsum(rev(lyrs)))
+  # layers to use are all those that are shallower than the given botz
+  lyr_vec <- lyrbot[lyrbot>botz]
+  # the depth of the first layer is equal to botz
+  lyr_vec <- c(botz,lyr_vec)
+  # in Atlantis, each box has the same number of depth layers, but some layers have zero thickness
+  # so we have to pad with zeroes to make all boxes have the same number of layers
+  nzeroes <- length(lyrs)-length(lyr_vec)
+  lyr_vec <- c(lyr_vec,rep(0,nzeroes))
+  
+  # if the Atlantis model has a surface layer, add that here
+  # if(surface_layer) lyr_vec[length(lyr_vec)] <- surface_layer_botz
+  # this returns a vector the BOTTOM-most depth of each layer, starting with the shallowest layer
+  lyr_vec
+}
+# construct the depth profiles of each Atlantis box
+
+atlantis_depths <- atlantis_bgm$boxes %>% select(.bx0,botz) %>% 
+  # apply the function above to create the layers
+  mutate(maxz=purrr::map(botz,~build_Atlantis_depths(.,lyrs=atlantis_z))) %>% 
+  unnest(cols=c(maxz)) %>% 
+  # add a minimum depth for each layer
+  group_by(.bx0) %>% 
+  mutate(minz=lead(maxz,1,default = 0),atlantis_layer=1:length(atlantis_z)) %>% 
+  # add a layer thickness calculation
+  mutate(dz=minz-maxz) %>% 
+  # "dummy" layers (layers too deep for a given Atlantis box) should have minz and dz=0
+  mutate(minz=ifelse(maxz==0,0,minz),dz=ifelse(maxz==0,0,dz)) %>% 
+  # the sediment layer has thickness 1m and is always the highest numbered layer for each box
+  group_by(.bx0) %>% 
+  mutate(dz=c(dz[1:(length(dz)-1)],1)) %>% 
+  ungroup() %>% 
+  # filter out all the zero-thickness layers and clean up
+  filter(dz!=0) %>% 
+  select(.bx0,atlantis_layer,minz,maxz,dz)
+
+# face depths (for later flux calcs)
+
+face_depths <- faces %>% 
+  left_join(atlantis_depths %>% select(.bx0,atlantis_layer,dz),by=c("left"=".bx0")) %>% 
+  mutate(left_area=length*dz) %>% 
+  select(-dz) %>% 
+  left_join(atlantis_depths %>% select(.bx0,atlantis_layer,dz),by=c("right"=".bx0","atlantis_layer")) %>% 
+  mutate(right_area=length*dz) %>% 
+  select(-dz) %>% 
+  # area of the face is the average area, maintaining NAs (if one box is deeper than its neighbor, no flux)
+  mutate(face_area=(left_area+right_area)/2)
+```
+
+Alternatively, the depth layers can be pulled directly from the initial conditions file for Atlantis (if this has already been build). You don't need to do this if you've added your own manual Atlantis depth vector in the previous step.
+
+```{r, eval=F}
+initnc <- tidync(here('data','atlantis','DIVCalCurrentV3_Biol.nc'))
+init_vars <- hyper_grids(initnc) %>% # all available grids in the ROMS ncdf
+  pluck("grid") %>% # for each grid, pull out all the variables asssociated with that grid and make a reference table
+  purrr::map_df(function(x){
+    initnc %>% activate(x) %>% hyper_vars() %>% 
+      mutate(grd=x)
+  })
+atlantis_depths2 <- initnc %>% activate(init_vars %>% filter(name=="nominal_dz") %>% pluck('grd')) %>% hyper_tibble()
+```
+
+## ROMS Depths
+
+Now, find and convert ROMS depths. Useful images [here](https://www.myroms.org/wiki/File:vertical_grid.png) and [here](https://www.myroms.org/wiki/Numerical_Solution_Technique#Vertical_Discretization)
+
+Depth at $\rho$ points is stored in the $h$ variable, and we can use that to calculate the "real" depth of ROMS layers.
+
+$u$ and $v$ points are one step trickier because they are between two ROMS grid cells, each with (potentially) different depths. For now, we average the $h$ values from the closest $\rho$ points for each $u$ and $v$, then determine the depth layers as above. But should check this with someone.
+
+Remember that, for Jacox ROMS:
+
+*  $\rho$ has $(\xi,\eta)$ dimensions 186 and 181, respectively
+*  $u$ has $(\xi,\eta)$ dimensions 185 and 181, respectively
+*  $v$ has $(\xi,\eta)$ dimensions 186 and 180, respectively
+
+**So, the closest rho points to u(x,y) are rho(x,y) and rho(x+1,y)**
+**The closest rho points to v(x,y) are rho(x,y) and rho(x,y+1)**
+
+The max depth ($h$) for each $u$ and $v$ point will be the average of the $h$ of its neighboring $\rho$ points.
+
+NOTE: If ROMS depth is dynamic over time (i.e., $h$, $S$, and $C$ change in each time slice), then the following steps will have to be repeated every "loop" when joining multiple ROMS outputs to the Atlantis grid. If the $x,y$ values of the $\rho$, $u$, and $v$ grids remain unchanged, then everything before this can be calculated only once.
+
+```{r}
+rho_uv_h_match <- h %>% 
+  group_by(eta_rho) %>% 
+  mutate(h_leadxi=lead(h)) %>% 
+  ungroup() %>% 
+  group_by(xi_rho) %>% 
+  mutate(h_leadeta=lead(h)) %>% 
+  ungroup() %>% 
+  mutate(h_v=(h+h_leadeta)/2,h_u=(h+h_leadxi)/2) %>% 
+  select(xi_rho:h_u,h)
+```
+
+With the matching key, we can join the correct h values to each $\rho$, $u$, and $v$ point
+
+```{r}
+# for rho we just join rho xy data to h
+roms_rho_depths <- rhoxy %>% 
+  left_join(rho_uv_h_match,by=c("xi_rho","eta_rho")) %>% 
+  select(rhoidx,xi_rho,eta_rho,lon_rho,lat_rho,x,y,h)
+  
+roms_u_depths <- uxy %>% # take the coordinate data for u
+  # join the matching key
+  left_join(rho_uv_h_match,by=c('xi_u'='xi_rho','eta_u'='eta_rho')) %>% 
+  select(uidx,xi_u,eta_u,lon_u,lat_u,x,y,h_u)
+
+roms_v_depths <- vxy %>% # take the coordinate data for v
+  left_join(rho_uv_h_match,by=c('xi_v'='xi_rho','eta_v'='eta_rho')) %>% 
+  # join the matching key
+  select(vidx,xi_v,eta_v,lon_v,lat_v,x,y,h_v)
+```
+
+## Depth Layer Matching
+
+For flux, we care about the Atlantis polygon faces joined to $u$ and $v$ points. For vertical flux $w$ and for static variables, we care about Atlantis polygons joined to interior $\rho$ points.
+
+To match layers between Atlantis points and ROMS points, we use interval-matching to slot ROMS slices into Atlantis prisms/depth layers. The result of applying the function below is a dataframe that indexes each Atlantis box or face and depth layer; the relevant $\xi$ and $\eta$ values that fall within it (in the case of $\rho$ points) or along it (in the case of $u$ and $v$ values for polygon faces); and the indices of the $\sigma_{\rho}$ vertical vector that belong to each Atlantis layer.
+
+```{r}
+# small function to find the roms depths for a given minimum and maximum atlantis layer depth
+# maxz is max depth of an Atlantis layer
+# minz is min depth of an Atlantis layer
+# romsdepths is a vector of real depths of ROMS
+
+find_ROMS_layers <- function(maxz,minz,romsdepths){
+  out <- findInterval(c(maxz,minz),romsdepths) # 
+  # these lines deal with edge cases, because we want roms layers to start at 1, not 0
+  # for the max roms layer issue (i.e., the surface) assign the last layer (max roms index value)
+  out[out==0] <- 1
+  out[out==length(romsdepths)+1] <- length(romsdepths)
+  return(seq(out[1],out[2],by=1)) # return a vector of identified ROMS depths layers
+}
+
+```
+
+First we use this function to join depths of $\rho$ points to Atlantis boxes/layers.
+
+```{r}
+# join rho depths to boxes index
+boxes_rho_fulljoin <- boxes_rho_join %>% 
+  select(.bx0,botz,area,lon_rho:y) %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(roms_rho_depths %>% st_set_geometry(NULL)) %>%  # join ROMS depth info
+  mutate(romsdepths=map(h,~.*Cs_r)) %>%  # calculate vector of real depths for given h
+  left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
+  drop_na() %>% # drop empty layers
+  mutate(sidx=purrr::pmap(list(maxz,minz,romsdepths),find_ROMS_layers)) %>% #apply layer matching
+  # clean up output
+  select(.bx0,contains("xi"),contains("eta"),contains("idx"),atlantis_layer,contains("min_"),contains("max_"))
+glimpse(boxes_rho_fulljoin)
+```
+
+For $w$, the points are at the same lon/lat as $\rho$ points, but there is one more [ROMS layer](https://www.myroms.org/wiki/images/4/41/vertical_grid.png) for $w$, and hence its own vertical coordinate $s_w$ and its own stretching values $Cs_w$
+
+```{r}
+# for w values, we have a different stretching function because there is one more layer
+boxes_w_fulljoin <- boxes_rho_join %>% 
+  select(.bx0,botz,area,lon_rho:y) %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(roms_rho_depths %>% st_set_geometry(NULL),
+            by=c("lon_rho", "lat_rho", "xi_rho", "eta_rho", "rhoidx", "x", "y")) %>%  # join ROMS depth info
+  mutate(romsdepths=map(h,~.*Cs_w)) %>%  # calculate vector of real depths for given h. We use Cs_w instead of Cs_r to convert
+  left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
+  drop_na() %>% # drop empty layers
+  mutate(sidx=purrr::pmap(list(maxz,minz,romsdepths),find_ROMS_layers)) %>% #apply layer matching
+  # clean up output
+  select(.bx0,contains("xi"),contains("eta"),contains("idx"),atlantis_layer,contains("min_"),contains("max_"))
+glimpse(boxes_w_fulljoin)
+```
+
+Finally, for $u$ and $v$ we care about the points near Atlantis polygon faces, not within boxes. So we use the dataframes created above that match Atlantis polygon faces to $u$ and $v$ points.
+
+```{r}
+# join u depths to boxes index
+faces_u_fulljoin <- faces_u_join %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(roms_u_depths %>% st_set_geometry(NULL),by = c("lon_u", "lat_u", "xi_u", "eta_u", "uidx", "x", "y")) %>%  # join ROMS depth info
+  mutate(romsdepths=map(h_u,~.*Cs_r)) %>%  # calculate vector of real depths for given h
+  left_join(boxes_u_join,by='uidx') %>% # use the boxes/u-values key to match u points to Atlantis boxes
+  left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
+  drop_na() %>% # drop empty layers
+  mutate(sidx=purrr::pmap(list(maxz,minz,romsdepths),find_ROMS_layers)) %>% #apply layer matching
+  # clean up output
+  select(.fx0:length,contains("xi"),contains("eta"),contains("idx"),atlantis_layer,contains("min_"),contains("max_"))
+glimpse(faces_u_fulljoin)
+
+# join v depths to boxes index
+faces_v_fulljoin <- faces_v_join %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(roms_v_depths %>% st_set_geometry(NULL),by = c("lon_v", "lat_v", "xi_v", "eta_v", "vidx", "x", "y")) %>%  # join ROMS depth info
+  mutate(romsdepths=map(h_v,~.*Cs_r)) %>%  # calculate vector of real depths for given h
+  left_join(boxes_v_join,by='vidx') %>% # us the boxes/u-values key to match u points to Atlantis boxes
+  left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
+  drop_na() %>% # drop empty layers
+  mutate(sidx=purrr::pmap(list(maxz,minz,romsdepths),find_ROMS_layers)) %>% #apply layer matching
+  # clean up output
+  select(.fx0:right,contains("xi"),contains("eta"),contains("idx"),atlantis_layer,contains("min_"),contains("max_"))
+glimpse(faces_v_fulljoin)
+```
+
+# Pull Variables
+
+Now that we have $\rho$, $u$, $v$, and $w$ points matched to Atlantis boxes, faces, and depths, we can actually pull data for variables of interest from the ROMS data. Because of the way we've organized the joins above, we can index data directly through its $(x,y,z)$ (i.e., `xi`,`eta`, and `s`) dimensions.
+
+```{r}
+# function to pull ROMS data
+# for now, this should work with things like salt, temp, u, v, w
+# returns an array with all of the data from the one time-slice of ROMS
+pull_var <- function(variable){
+  grd <- roms_vars %>% filter(name==variable) %>% pluck('grd')
+  dat <- roms %>% activate(grd) %>% hyper_array()
+  return(dat[[variable]])
+}
+# index into the variable array using xi, eta, and s indices
+join_var <- function(a,xi,eta,s) a[xi,eta,s]
+```
+
+## Static Variables
+
+```{r}
+salt <- pull_var('salt')
+temperature <- pull_var('temp')
+boxes_roms_salt_temp <- boxes_rho_fulljoin %>% 
+  mutate(salt_vec=pmap(list(xi_rho,eta_rho,sidx),join_var,a=salt),
+         temp_vec=pmap(list(xi_rho,eta_rho,sidx),join_var,a=temperature))
+glimpse(boxes_roms_salt_temp)
+```
+
+If we want, we can calculate some summary function for these values here. For example, we could calculate, for each polygon and Atlantis layer, the mean salinity and temperature.
+
+```{r}
+boxes_roms_salt_temp <- boxes_roms_salt_temp %>% 
+  mutate(meansalt_rho=map_dbl(salt_vec,mean),
+         meantemp_rho=map_dbl(temp_vec,mean)) %>% 
+  group_by(.bx0,atlantis_layer) %>% 
+  summarise(meansalt=mean(meansalt_rho),
+            meantemp=mean(meantemp_rho)) %>% 
+  ungroup()
+```
+
+Map of surface salinity for this time slice. Gray boxes are outside ROMS domain and hence did not match to $\rho$ points
+
+```{r}
+boxes_roms_salt_temp %>% 
+  filter(atlantis_layer!=7) %>% 
+  group_by(.bx0) %>% 
+  slice_max(atlantis_layer) %>% 
+  ungroup() %>% 
+  full_join(atlantis_sf,by='.bx0') %>% 
+  st_as_sf() %>% 
+  ggplot(aes(fill=meansalt))+
+  geom_sf()+
+  scale_fill_viridis()+
+  labs(fill="Salinity",title="Mean Surface Salinity from\njoined ROMS/Atlantis")
+```
+
+## Fluxes
+
+Apply the functions above to pull vectors of ROMS data into the joined dataframes.
+
+```{r}
+u <- pull_var('u')
+faces_roms_u<- faces_u_fulljoin %>% 
+  mutate(uvec=pmap(list(xi_u,eta_u,sidx),join_var,a=u)) # pull u values from ROMS
+glimpse(faces_roms_u)
+```
+
+```{r}
+v <- pull_var('v')
+
+faces_roms_v<- faces_v_fulljoin %>% 
+  mutate(vvec=pmap(list(xi_v,eta_v,sidx),join_var,a=v)) # pull v values from ROMS
+glimpse(faces_roms_v)
+```
+
+```{r}
+w <- pull_var('w')
+boxes_roms_w <- boxes_w_fulljoin %>% 
+  mutate(wvec=pmap(list(xi_rho,eta_rho,sidx),join_var,a=w))
+glimpse(boxes_roms_w)
+```
+
+Do some trigonometry (yikes!) to calculate actual vectors of flow across each face.
+
+```{r}
+test_u <- faces_roms_u %>%
+  # join area of each face (averaged between that layer of left and right-side boxes)
+  left_join(face_depths) %>% 
+  # calculate angle perpendicular to face (pointing left to right)
+  # angles of the faces are in the 1st and 3rd quadrants (pos cos and pos sin or neg cos and neg sin)
+  mutate(angle=atan2(ifelse(sine>0,-sine,sine),ifelse(cosine>0,cosine,-cosine))) %>% 
+  # take mean v and u
+  group_by(.fx0,length,atlantis_layer,face_area,angle,xi_u,eta_u) %>%
+  mutate(meanu=map_dbl(uvec,mean)) %>% 
+  group_by(.fx0,length,atlantis_layer,face_area,angle) %>% 
+  summarise(meanu=mean(meanu)) %>% 
+  ungroup()
+
+test_v <- faces_roms_v %>% 
+  # join area of each face (averaged between that layer of left and right-side boxes)
+  left_join(face_depths) %>% 
+  # calculate angle perpendicular to face (pointing left to right)
+  # angles of the faces are in the 1st and 3rd quadrants (pos cos and pos sin or neg cos and neg sin)
+  mutate(angle=atan2(ifelse(sine>0,-sine,sine),ifelse(cosine>0,cosine,-cosine))) %>% 
+  # take mean v and u
+  group_by(.fx0,length,atlantis_layer,face_area,angle,xi_v,eta_v) %>%
+  mutate(meanv=map_dbl(vvec,mean)) %>% 
+  group_by(.fx0,length,atlantis_layer,face_area,angle) %>% 
+  summarise(meanv=mean(meanv)) %>% 
+  ungroup()
+test_uv <- test_u %>% left_join(test_v) %>% 
+  mutate(uv_angle=atan(meanv/meanu),uv_mag=sqrt(meanu^2+meanv^2)) %>%
+  mutate(angle_diff=angle-uv_angle,
+         new_vec=uv_mag*cos(angle_diff))
+
+```
 

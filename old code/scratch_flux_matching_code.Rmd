@@ -1,0 +1,170 @@
+---
+title: "Old Code"
+author: "Owen Liu"
+date: "2/8/2021"
+output: html_document
+---
+
+Pieces of code that probably won't be useful anymore, but were used in trial-and-error construction of the Atlantis/ROMS matching code in the main code directory.
+
+
+# Old Code
+```{r}
+# pull_ROMS_u <- function(xi,eta,smin,smax) {
+#   # find the right ncdf grid and variable names
+#   grd <- roms_vars %>% filter(name=='u') %>% pluck('grd')
+#   dims <- roms %>% activate(grd) %>% hyper_dims() %>% pluck('name')
+#   # pull the (filtered) data
+#   dat <- roms %>% activate(grd) %>%
+#     hyper_tibble(!!xi_var:=xi_var==xi,
+#                  !!eta_var:=eta_var==eta,
+#                  !!s_var:=s_var>=smin & s_var<=smax) %>%
+#     pluck(variable)
+# }
+# 
+# pull_ROMS_u <- function(xi,eta,smin,smax) {
+#   # find the right ncdf grid and variable names
+#   grd <- roms_vars %>% filter(name=='u') %>% pluck('grd')
+#   dims <- roms %>% activate(grd) %>% hyper_dims() %>% pluck('name')
+#   # pull the (filtered) data
+#   dat <- roms %>% activate(grd) %>%
+#     hyper_tibble(xi_u=xi_u==xi,eta_u=eta_u==eta,s_rho=s_rho>=smin&s_rho<=smax) %>%
+#     pluck(variable)
+#   return(dat)
+# }
+# pullu <- function(xi,eta,smin,smax) {u %>% filter(xi_u==xi,eta_u==eta,s_rho>=smin,s_rho<=smax) %>% pluck('u')}
+```
+
+Function to find the correct ROMS layers for a given h and Atlantis layer. Returns a list of ROMS layer indices, where each list element is a integer vector indicating which ROMS layers fall between the boundaries of the Atlantis layer.
+
+```{r}
+# h is max ROMS cell depth, Cs_r is a vector of stretching values, minz and maxz are minimum and maximum depth values of an Atlantis box
+find_roms_layers <- function(h,Cs_r,minz,maxz){
+  if(maxz==0&minz==0) return(NA) # if it's a "dummy" Atlantis layer, don't match any ROMS layers
+  # Use h and Cs_r to calculate the depth profile of the ROMS cell
+  candidate_depths <- tibble(Cs_r=Cs_r,layer_bot=h*Cs_r,layer_top=lead(layer_bot,default=0),layer=1:length(Cs_r)) %>% 
+    mutate(layer_rhoz=(layer_bot+layer_top)/2)
+  depths_sub <- candidate_depths %>% filter(between(layer_top,maxz,minz)|between(layer_bot,maxz,minz))
+  # return the indices of the matching ROMS layers
+  return(depths_sub$layer)
+}
+```
+
+What if we just had s_rho min and s_rho max?
+
+## Join ROMS layers to Atlantis boxes
+
+This step takes a little bit of time to do the large join.
+
+```{r}
+tm <- proc.time()
+boxes_roms_layers <- boxes_rho_join %>%  
+  # remove geometry
+  st_set_geometry(NULL) %>% 
+  # join atlantis layers
+  left_join(atlantis_depths,by=".bx0") %>% 
+  # filter out dummy Atlantis boxes and boxes with no rho points
+  filter(dz>0,!is.na(xi_rho)) %>% 
+  # join ROMS h
+  left_join(h,by=c("xi_rho","eta_rho")) %>% 
+  # do the layer matching function to match roms depths layers to Atlantis box layers
+  mutate(roms_layers=purrr::pmap(list(h,minz,maxz),find_roms_layers,Cs_r=Cs_r))
+proc.time()-tm
+# ~2 minutes
+```
+
+For u and v: match u and v points to faces, and pull h from 
+
+```{r}
+# raster version of atlantis grid
+atlantis_ll <- atlantis %>% st_transform(4326) %>% mutate(area_km2=area/1e6) %>% dplyr::select(-area)
+st_write(atlantis_ll,here::here('data','atlantis','emocc_ll.shp'),delete_dsn = T)
+atlantis_ll_r <- atlantis_ll %>% fasterize::fasterize(raster=raster::raster(resolution=0.1),field="box_id") %>% 
+  raster::crop(extent(atlantis_ll))
+plot(atlantis_ll_r)
+writeRaster(atlantis_ll_r,here::here('data','atlantis','emocc_raster.grd'),overwrite=T)
+```
+
+# Convert Raster to Points
+
+```{r}
+oxy_pts <- oxy %>% rasterToPoints() %>%
+  as_tibble() %>% 
+  rename(oxybot=layer) %>% 
+  st_as_sf(coords=c('x','y'),crs=4326) %>% 
+  # convert to same crs as atlantis
+  st_transform(st_crs(atlantis)) %>% 
+  st_crop(st_bbox(atlantis)) %>% 
+  mutate(cellNum=row_number())
+```
+
+# Example Calculation
+
+Get a matrix of neighboring polygons
+
+```{r}
+# poly_neighbors <- st_relate(atlantis, pattern = "****1****")
+```
+
+Take one of the Atlantis polygons, find its edges, and find the closest raster cells to its edges
+
+```{r}
+box55 <- atlantis %>% filter(label=="Box55")
+box55 %>% ggplot()+geom_sf()
+
+# split into faces (hacky...)
+box55_faces <- box55 %>% st_cast("POINT") %>% 
+  mutate(pt=row_number()) %>% 
+  slice(1,rep(2:(n()-1),each=2),n()) %>% 
+  # line segment identifier, such that the segment for each VMS point is composed of its own point and the next point
+  mutate(face=lag(pt,1)) %>% replace_na(list(face=1)) %>% 
+  # build the lines
+  group_by(face) %>% 
+  summarise() %>% 
+  st_cast('LINESTRING') %>% 
+  ungroup()
+box55_faces
+ggplot(box55_faces)+geom_sf()+geom_sf_text(aes(label=face))
+#just the boundary
+# box55 %>% st_boundary()
+
+# and with its neighbors
+# box55 <- atlantis %>% filter(box_id %in% poly_neighbors[[55]])
+# box55 %>% ggplot()+geom_sf()+geom_sf_label(aes(label=box_id))
+# 
+# box75 <- atlantis %>% filter(box_id %in% poly_neighbors[[75]])
+# box75 %>% ggplot()+geom_sf()+geom_sf_label(aes(label=box_id))
+
+```
+
+We have the faces of a polygon now. Now, for each face, we want to find the raster/ROMS cells closest to it, then calculate a flux at the right angle.
+
+```{r}
+box55_buff <- st_buffer(box55_faces,10000) #10,000 m= 10km
+box55_buff %>% ggplot()+geom_sf()
+
+# intersect the ROMS points to the polygon buffer
+box55_roms_intersect <- box55_buff %>% st_join(oxy_pts,join=st_contains)
+glimpse(box55_roms_intersect)
+# here's an example of a face with its joined roms points
+box55_face1 <- box55_roms_intersect %>% filter(face==1)
+box55_face1 %>% ggplot()+geom_sf()+geom_sf(data=oxy_pts %>% filter(cellNum %in% box55_face1$cellNum))
+
+process_face <- function(polyface){
+  
+}
+
+# calculate angle of the face
+calc_angle <- function(l) {
+  x<- l['X']
+  y<- l['Y']
+  atan((y[2]-y[1])/(x[2]-x[1]))
+}
+box55_angle <- box55_faces %>% filter(face==1) %>% 
+  st_transform(4326) %>% 
+  st_coordinates() %>% .[,c("X","Y")] %>%  geosphere::bearing()
+```
+
+
+
+
