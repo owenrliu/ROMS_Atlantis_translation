@@ -555,8 +555,8 @@ boxes_roms_salt_temp <- boxes_roms_salt_temp %>%
   mutate(meansalt_rho=map_dbl(salt_vec,mean),
          meantemp_rho=map_dbl(temp_vec,mean)) %>% 
   group_by(.bx0,atlantis_layer) %>% 
-  summarise(meansalt=mean(meansalt_rho),
-            meantemp=mean(meantemp_rho)) %>% 
+  summarise(meansalt=mean(meansalt_rho, na.rm = T),
+            meantemp=mean(meantemp_rho, na.rm = T)) %>% # check this, but some rho points have NA values for salt and temp, which then carry over to the entire box when averaging if we do not remove them
   ungroup()
 ```
 
