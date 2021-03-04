@@ -447,7 +447,7 @@ To match layers between Atlantis points and ROMS points, we use interval-matchin
 # Albi Mar 4 2021. Changed this to assign ROMS depth to Atlantis z-layer, instead of other way around. This solves incorrect mapping of ROMS depth layers at the boundaries between Atlantis z-layers. Also this assumes that the "top" layer (maxz = 0, minz = 0, dz = 1; number 7 in the California Current example) is sediment. Previous code mapped the shallowest ROMS layer to the sediment layer. Double-check.
 
 find_ROMS_layers <- function(maxz,minz,romsdepths){
-  out <- findInterval(v = c(maxz,minz), x = romsdepths)
+  out <- findInterval(vec = c(maxz,minz), x = romsdepths)
   out.idx <- which(out == 1)
   return(out.idx)
   # # these lines deal with edge cases, because we want roms layers to start at 1, not 0
