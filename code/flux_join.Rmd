@@ -385,51 +385,50 @@ atlantis_depths2 <- initnc %>% activate(init_vars %>% filter(name=="nominal_dz")
 Now, find and convert ROMS depths. Useful images [here](https://www.myroms.org/wiki/File:vertical_grid.png) and [here](https://www.myroms.org/wiki/Numerical_Solution_Technique#Vertical_Discretization)
 
 Depth at $\rho$ points is stored in the $h$ variable, and we can use that to calculate the "real" depth of ROMS layers.
+```{r,include=F,eval=F}
+# Update March 2021- don't need to average depths for u and v points---ROMS assumes their depths are the same as their corresponding rho points
+# $u$ and $v$ points are one step trickier because they are between two ROMS grid cells, each with (potentially) different depths. For now, we average the $h$ values from the closest $\rho$ points for each $u$ and $v$, then determine the depth layers as above. But should check this with someone.
+# The max depth ($h$) for each $u$ and $v$ point will be the average of the $h$ of its neighboring $\rho$ 
+#**So, the closest rho points to u(x,y) are rho(x,y) and rho(x+1,y)**
+#**The closest rho points to v(x,y) are rho(x,y) and rho(x,y+1)**
+# rho_uv_h_match <- h %>% 
+#   group_by(eta_rho) %>% 
+#   mutate(h_leadxi=lead(h)) %>% 
+#   ungroup() %>% 
+#   group_by(xi_rho) %>% 
+#   mutate(h_leadeta=lead(h)) %>% 
+#   ungroup() %>% 
+#   mutate(h_v=(h+h_leadeta)/2,h_u=(h+h_leadxi)/2) %>% 
+#   select(xi_rho:h_u,h)
+```
 
-$u$ and $v$ points are one step trickier because they are between two ROMS grid cells, each with (potentially) different depths. For now, we average the $h$ values from the closest $\rho$ points for each $u$ and $v$, then determine the depth layers as above. But should check this with someone.
-
-Remember that, for Jacox ROMS:
+Remember that, for ROMS:
 
 *  $\rho$ has $(\xi,\eta)$ dimensions 186 and 181, respectively
 *  $u$ has $(\xi,\eta)$ dimensions 185 and 181, respectively
 *  $v$ has $(\xi,\eta)$ dimensions 186 and 180, respectively
 
-**So, the closest rho points to u(x,y) are rho(x,y) and rho(x+1,y)**
-**The closest rho points to v(x,y) are rho(x,y) and rho(x,y+1)**
-
-The max depth ($h$) for each $u$ and $v$ point will be the average of the $h$ of its neighboring $\rho$ points.
+$u$ and $v$ are assigned the same h as their corresponding $\rho$ points.
 
 NOTE: If ROMS depth is dynamic over time (i.e., $h$, $S$, and $C$ change in each time slice), then the following steps will have to be repeated every "loop" when joining multiple ROMS outputs to the Atlantis grid. If the $x,y$ values of the $\rho$, $u$, and $v$ grids remain unchanged, then everything before this can be calculated only once.
-
-```{r}
-rho_uv_h_match <- h %>% 
-  group_by(eta_rho) %>% 
-  mutate(h_leadxi=lead(h)) %>% 
-  ungroup() %>% 
-  group_by(xi_rho) %>% 
-  mutate(h_leadeta=lead(h)) %>% 
-  ungroup() %>% 
-  mutate(h_v=(h+h_leadeta)/2,h_u=(h+h_leadxi)/2) %>% 
-  select(xi_rho:h_u,h)
-```
 
 With the matching key, we can join the correct h values to each $\rho$, $u$, and $v$ point
 
 ```{r}
 # for rho we just join rho xy data to h
 roms_rho_depths <- rhoxy %>% 
-  left_join(rho_uv_h_match,by=c("xi_rho","eta_rho")) %>% 
+  left_join(h,by=c("xi_rho","eta_rho")) %>% 
   select(rhoidx,xi_rho,eta_rho,lon_rho,lat_rho,x,y,h)
   
 roms_u_depths <- uxy %>% # take the coordinate data for u
   # join the matching key
-  left_join(rho_uv_h_match,by=c('xi_u'='xi_rho','eta_u'='eta_rho')) %>% 
-  select(uidx,xi_u,eta_u,lon_u,lat_u,x,y,h_u)
+  left_join(h,by=c('xi_u'='xi_rho','eta_u'='eta_rho')) %>% 
+  select(uidx,xi_u,eta_u,lon_u,lat_u,x,y,h)
 
 roms_v_depths <- vxy %>% # take the coordinate data for v
-  left_join(rho_uv_h_match,by=c('xi_v'='xi_rho','eta_v'='eta_rho')) %>% 
+  left_join(h,by=c('xi_v'='xi_rho','eta_v'='eta_rho')) %>% 
   # join the matching key
-  select(vidx,xi_v,eta_v,lon_v,lat_v,x,y,h_v)
+  select(vidx,xi_v,eta_v,lon_v,lat_v,x,y,h)
 ```
 
 ## Depth Layer Matching
@@ -501,7 +500,7 @@ Finally, for $u$ and $v$ we care about the points near Atlantis polygon faces, n
 faces_u_fulljoin <- faces_u_join %>% 
   st_set_geometry(NULL) %>% 
   left_join(roms_u_depths %>% st_set_geometry(NULL),by = c("lon_u", "lat_u", "xi_u", "eta_u", "uidx", "x", "y")) %>%  # join ROMS depth info
-  mutate(romsdepths=map(h_u,~.*Cs_r)) %>%  # calculate vector of real depths for given h
+  mutate(romsdepths=map(h,~.*Cs_r)) %>%  # calculate vector of real depths for given h
   left_join(boxes_u_join,by='uidx') %>% # use the boxes/u-values key to match u points to Atlantis boxes
   left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
   drop_na() %>% # drop empty layers
@@ -514,7 +513,7 @@ glimpse(faces_u_fulljoin)
 faces_v_fulljoin <- faces_v_join %>% 
   st_set_geometry(NULL) %>% 
   left_join(roms_v_depths %>% st_set_geometry(NULL),by = c("lon_v", "lat_v", "xi_v", "eta_v", "vidx", "x", "y")) %>%  # join ROMS depth info
-  mutate(romsdepths=map(h_v,~.*Cs_r)) %>%  # calculate vector of real depths for given h
+  mutate(romsdepths=map(h,~.*Cs_r)) %>%  # calculate vector of real depths for given h
   left_join(boxes_v_join,by='vidx') %>% # us the boxes/u-values key to match u points to Atlantis boxes
   left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
   drop_na() %>% # drop empty layers
