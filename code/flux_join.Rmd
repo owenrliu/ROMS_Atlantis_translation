@@ -215,7 +215,7 @@ faces <- atlantis_bgm$faces %>% select(-label)
 glimpse(faces)
 
 faces_sf <- atlantis_bgm %>% face_sf() %>% 
-  mutate(label = label-1) %>% # ensure that 'label' starts from 0 for correct join with '.fx0' below
+  mutate(label = 0:(length(label)-1)) %>% # creates a new index 'face_id' starting from 0 and increasing, as the 'label' column produced by rbgm::face_sf() is incorrect (tested in R 4.0.4)
   # join attribute data
   left_join(faces,by=c('label'='.fx0')) %>% 
   rename(.fx0=label)
