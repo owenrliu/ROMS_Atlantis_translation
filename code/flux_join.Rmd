@@ -367,6 +367,32 @@ face_depths <- faces %>%
   mutate(face_area=(left_area+right_area)/2)
 ```
 
+Albi Mar 16 2021. I added this chunk to revert the atlantis depth layers in such way that 1 is the shallowest. 7 is always the sediment. 
+
+```{r}
+
+reverse_layers <- function(atlantis_layer) {
+  atlantis_layer[atlantis_layer!=7] = rev(atlantis_layer[atlantis_layer!=7])
+  return(atlantis_layer)
+}
+
+atlantis_depths_rev <- atlantis_depths %>%
+  group_by(.bx0) %>%
+  mutate(atlantis_layer = reverse_layers(atlantis_layer))
+
+face_depths_rev <- faces %>% 
+  left_join(atlantis_depths_rev %>% select(.bx0,atlantis_layer,dz),by=c("left"=".bx0")) %>% 
+  mutate(left_area=length*dz) %>% 
+  select(-dz) %>% 
+  left_join(atlantis_depths_rev %>% select(.bx0,atlantis_layer,dz),by=c("right"=".bx0","atlantis_layer")) %>% 
+  mutate(right_area=length*dz) %>% 
+  select(-dz) %>% 
+  # area of the face is the average area, maintaining NAs (if one box is deeper than its neighbor, no flux)
+  mutate(face_area=(left_area+right_area)/2)
+
+```
+
+
 Alternatively, the depth layers can be pulled directly from the initial conditions file for Atlantis (if this has already been build). You don't need to do this if you've added your own manual Atlantis depth vector in the previous step.
 
 ```{r, eval=F}
@@ -467,7 +493,7 @@ boxes_rho_fulljoin <- boxes_rho_join %>%
   st_set_geometry(NULL) %>% 
   left_join(roms_rho_depths %>% st_set_geometry(NULL)) %>%  # join ROMS depth info
   mutate(romsdepths=map(h,~.*Cs_r)) %>%  # calculate vector of real depths for given h
-  left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
+  left_join(atlantis_depths_rev,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
   drop_na() %>% # drop empty layers
   mutate(sidx=purrr::pmap(list(maxz,minz,romsdepths),find_ROMS_layers)) %>% #apply layer matching
   # clean up output
@@ -485,7 +511,7 @@ boxes_w_fulljoin <- boxes_rho_join %>%
   left_join(roms_rho_depths %>% st_set_geometry(NULL),
             by=c("lon_rho", "lat_rho", "xi_rho", "eta_rho", "rhoidx", "x", "y")) %>%  # join ROMS depth info
   mutate(romsdepths=map(h,~.*Cs_w)) %>%  # calculate vector of real depths for given h. We use Cs_w instead of Cs_r to convert
-  left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
+  left_join(atlantis_depths_rev,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
   drop_na() %>% # drop empty layers
   mutate(sidx=purrr::pmap(list(maxz,minz,romsdepths),find_ROMS_layers)) %>% #apply layer matching
   # clean up output
@@ -502,7 +528,7 @@ faces_u_fulljoin <- faces_u_join %>%
   left_join(roms_u_depths %>% st_set_geometry(NULL),by = c("lon_u", "lat_u", "xi_u", "eta_u", "uidx", "x", "y")) %>%  # join ROMS depth info
   mutate(romsdepths=map(h,~.*Cs_r)) %>%  # calculate vector of real depths for given h
   left_join(boxes_u_join,by='uidx') %>% # use the boxes/u-values key to match u points to Atlantis boxes
-  left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
+  left_join(atlantis_depths_rev,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
   drop_na() %>% # drop empty layers
   mutate(sidx=purrr::pmap(list(maxz,minz,romsdepths),find_ROMS_layers)) %>% #apply layer matching
   # clean up output
@@ -515,7 +541,7 @@ faces_v_fulljoin <- faces_v_join %>%
   left_join(roms_v_depths %>% st_set_geometry(NULL),by = c("lon_v", "lat_v", "xi_v", "eta_v", "vidx", "x", "y")) %>%  # join ROMS depth info
   mutate(romsdepths=map(h,~.*Cs_r)) %>%  # calculate vector of real depths for given h
   left_join(boxes_v_join,by='vidx') %>% # us the boxes/u-values key to match u points to Atlantis boxes
-  left_join(atlantis_depths,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
+  left_join(atlantis_depths_rev,by='.bx0') %>% # join Atlantis depths to expand to all relevant Atlantis layers
   drop_na() %>% # drop empty layers
   mutate(sidx=purrr::pmap(list(maxz,minz,romsdepths),find_ROMS_layers)) %>% #apply layer matching
   # clean up output
@@ -610,7 +636,7 @@ Do some trigonometry (yikes!) to calculate actual vectors of flow across each fa
 ```{r}
 test_u <- faces_roms_u %>%
   # join area of each face (averaged between that layer of left and right-side boxes)
-  left_join(face_depths) %>% 
+  left_join(face_depths_rev) %>% 
   # calculate angle perpendicular to face (pointing left to right)
   # angles of the faces are in the 1st and 3rd quadrants (pos cos and pos sin or neg cos and neg sin)
   mutate(angle=atan2(ifelse(sine>0,-sine,sine),ifelse(cosine>0,cosine,-cosine))) %>% 
@@ -623,7 +649,7 @@ test_u <- faces_roms_u %>%
 
 test_v <- faces_roms_v %>% 
   # join area of each face (averaged between that layer of left and right-side boxes)
-  left_join(face_depths) %>% 
+  left_join(face_depths_rev) %>% 
   # calculate angle perpendicular to face (pointing left to right)
   # angles of the faces are in the 1st and 3rd quadrants (pos cos and pos sin or neg cos and neg sin)
   mutate(angle=atan2(ifelse(sine>0,-sine,sine),ifelse(cosine>0,cosine,-cosine))) %>% 
@@ -676,26 +702,26 @@ test_u_albi <- faces_roms_u %>%
   # join with angle information for the faces, to be used later for difference between uv and face
   left_join(faces_sf_albi) %>%
   # join area of each face (averaged between that layer of left and right-side boxes)
-  left_join(face_depths)%>%
+  left_join(face_depths_rev)%>%
   # take mean u per u point per layer per face
   group_by(.fx0,length,atlantis_layer,face_area,face_angle,xi_u,eta_u) %>%
   mutate(meanu=map_dbl(uvec,mean)) %>% 
   # take mean u per layer per face
   group_by(.fx0,length,atlantis_layer,face_area,face_angle) %>% 
-  summarise(meanu=mean(meanu)) %>% 
+  summarise(meanu=mean(meanu, na.rm = TRUE)) %>% # doing this for now or NA values for individual points will carry over and turn means into NAs
   ungroup()
 
 test_v_albi <- faces_roms_v %>% 
   # join with angle information for the faces, to be used later for difference between uv and face
   left_join(faces_sf_albi) %>%
   # join area of each face (averaged between that layer of left and right-side boxes)
-  left_join(face_depths) %>% 
+  left_join(face_depths_rev) %>% 
   # take mean v per v point per layer per face
   group_by(.fx0,length,atlantis_layer,face_area,face_angle,xi_v,eta_v) %>%
   mutate(meanv=map_dbl(vvec,mean)) %>% 
   #take mean v per layer per face
   group_by(.fx0,length,atlantis_layer,face_area,face_angle) %>% 
-  summarise(meanv=mean(meanv)) %>% 
+  summarise(meanv=mean(meanv, na.rm = TRUE)) %>% # doing this for now or NA values for individual points will carry over and turn means into NAs
   ungroup()
 
 # pull u and v together. 
