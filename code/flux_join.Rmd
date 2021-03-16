@@ -659,6 +659,12 @@ So, I calculate the angles of the faces myself from topological information in t
 
 # from the faces_sf spatial object, let's retrieve geometry information of the points that define each face, and calculate the angle. Also calclate its sine and cosine to see how they compare with the BGM values
 
+get_angle <- function(geomstring) {
+  coords <- st_coordinates(geomstring)
+  this_atan <- atan2(coords[2,2]-coords[1,2], coords[2,1]-coords[1,1]) # as per R help, atan2(y,x)
+  return(this_atan)
+}
+
 faces_sf_albi <- faces_sf %>% rowwise() %>% mutate(face_angle = get_angle(geometry),
                                                    sine_albi = sin(face_angle),
                                                    cosine_albi = cos(face_angle)) %>%
