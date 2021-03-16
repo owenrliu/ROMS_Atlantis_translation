@@ -640,3 +640,79 @@ test_uv <- test_u %>% left_join(test_v) %>%
 
 ```
 
+### Albi's alternative approach for calculating fluxes. 
+
+The premise: I cannot seem to understand how sine and cosine of the faces are calculated in the BGM file. More specifically I am confused as to why all faces have *either* positive sine __and__ positive cosine *or* negative sine __and__ negative cosine (sure faces are oriented in all directions in the 2D plane? This pos/pos neg/neg business is the case for a number of BGM files I could get my hands on, but not for all of them); also, I am unsure about the reference axis used to calculate the angle defined by the faces according to sine and cosine as they are reported in the BGM (that is, it is the angle between the face and what? The North axis? The East axis for consistency with the unit circle? In many examples of BGM files retrieved from bgmfiles::bgmfiles() neither of these seems to be the case). I tried to get in touch with who wrote the BGMeriser package through a CSIRO contact to see if I can understand it from the source code, but I am still waiting for an answer.
+
+So, I calculate the angles of the faces myself from topological information in the BGM.
+
+1. For a face between p1 and p2 (where p1(x1,y1) and p2(x2,y2)) I calculate the angle $\alpha$ of the face not from sine and cosine as they appear in the BGM file, but with atan2(y2-y1, x2-x1). I have done a fair bit of testing and this seems to work. Angles of the faces here are expressed in polar coordinates where E=0, N=90, and S=-90. That is, I am keeping the sign of the angles without normalizing to +360 (or +2$\pi$), because the sign will become important later to work out the direction of a flux across a face.
+2. If for each ROMS cell u and v denote the eastward and northward components of a flux respectively, I calculate the angle $\beta$ of the resulting uv flux as atan2(v,u). $\beta$ also is returned in polar coordinates: positive values (in radians) place it in the 1st and 2nd quadrants, negative values (in radians) in the 3rd and 4th. Again done a good bit of testing and this seems to check out.
+3. To calculate the angle $\gamma$ of the flux relative to each face, I subtract the face angle from the flux angle ($\gamma$ = $\beta$ - $\alpha$). 
+4. To have $\gamma$ positive when it points to the left and negative when it points to the right of the face (when looking from p1 to p2), I modify $\gamma$ in the following way (this does not change the angle as I add or subtract $2\pi$):
+  + If $0\le\gamma\le\pi$ or $-\pi\le\gamma <0$, leave it as it is.
+  + If $\gamma<-\pi$, then $\gamma = \gamma+2\pi$.
+  + If $\gamma>\pi$, then $\gamma=\gamma-2\pi$.
+5. Based on the value of $\gamma$, I assign a scalar to the flux. If $\gamma$>0, +1, if $\gamma$<0, -1. This corresponds to a LR flux being negative, and a RL flux positive, which is the convention for the Hydroconstruct (and Atlantis) files.
+
+```{r}
+
+# from the faces_sf spatial object, let's retrieve geometry information of the points that define each face, and calculate the angle. Also calclate its sine and cosine to see how they compare with the BGM values
+
+faces_sf_albi <- faces_sf %>% rowwise() %>% mutate(face_angle = get_angle(geometry),
+                                                   sine_albi = sin(face_angle),
+                                                   cosine_albi = cos(face_angle)) %>%
+  select(.fx0, face_angle) %>% st_set_geometry(NULL) # only keep face id and angle
+
+# now use the same code as above, except the line that works out the angles from sine and cosine
+
+test_u_albi <- faces_roms_u %>%
+  # join with angle information for the faces, to be used later for difference between uv and face
+  left_join(faces_sf_albi) %>%
+  # join area of each face (averaged between that layer of left and right-side boxes)
+  left_join(face_depths)%>%
+  # take mean u per u point per layer per face
+  group_by(.fx0,length,atlantis_layer,face_area,face_angle,xi_u,eta_u) %>%
+  mutate(meanu=map_dbl(uvec,mean)) %>% 
+  # take mean u per layer per face
+  group_by(.fx0,length,atlantis_layer,face_area,face_angle) %>% 
+  summarise(meanu=mean(meanu)) %>% 
+  ungroup()
+
+test_v_albi <- faces_roms_v %>% 
+  # join with angle information for the faces, to be used later for difference between uv and face
+  left_join(faces_sf_albi) %>%
+  # join area of each face (averaged between that layer of left and right-side boxes)
+  left_join(face_depths) %>% 
+  # take mean v per v point per layer per face
+  group_by(.fx0,length,atlantis_layer,face_area,face_angle,xi_v,eta_v) %>%
+  mutate(meanv=map_dbl(vvec,mean)) %>% 
+  #take mean v per layer per face
+  group_by(.fx0,length,atlantis_layer,face_area,face_angle) %>% 
+  summarise(meanv=mean(meanv)) %>% 
+  ungroup()
+
+# pull u and v together. 
+
+test_uv_albi <- test_u_albi %>% 
+  left_join(test_v_albi) %>%
+  mutate(uv_angle=atan2(meanv, meanu),uv_mag=sqrt(meanu^2+meanv^2)) %>%
+  mutate(diff_angle = uv_angle - face_angle, # beta - alpha
+         angle_new = ifelse((diff_angle>=0 & diff_angle<=pi) | (diff_angle<0 & diff_angle>=-pi), diff_angle, # add or subtract 2*pi as needed (9)see above)
+                            ifelse(diff_angle < -pi, diff_angle+2*pi, diff_angle-2*pi)),
+         scalar = ifelse(angle_new>=0, 1, -1), # work out a scalar that is negative for LR fluxes and positive for RL fluxes
+         new_vec = uv_mag * scalar) # apply the scalar to the flux. Am I missing a step here? Do I need to multiply by cos? Check
+
+```
+
+Results are different from the original version from Owen, so this will need more work / double-checking.
+
+This left and right issue will be the tricky part. After this, it should be only a case of multiplying this flux by area of the face/depth layer to get the net exchange across the face in m3/s, which is what HydroConstruct needs
+
+```{r}
+
+fluxes <- test_uv_albi %>% mutate(gross = new_vec * face_area) %>%
+  select(.fx0, atlantis_layer, gross)
+
+```
+
