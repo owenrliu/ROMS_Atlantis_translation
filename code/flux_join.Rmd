@@ -290,18 +290,19 @@ paste0("Atlantis boxes with no ROMS points are boxes ",paste(empty_boxes$box_id,
 
 We need to match Atlantis box depth layers to the appropriate depths from ROMS. We need to use the thickness of depths layers *specific to this Atlantis model*, because not all Atlantis models have the same total number of depth layers.
 
-First, construct Atlantis depths. In the CalCurrent Atlantis, each box can have a maximum of 7 depth layers, where the 7th layer is 1m thick and represents the sediment. The rest of the depth layers start with layer 6 being the shallowest, then 5, 4, etc.
+First, construct Atlantis depths. In the CalCurrent Atlantis, each box can have a maximum of 7 depth layers, where the 7th layer is 1m thick and represents the sediment. The rest of the depth layers start with layer 1 being the shallowest.
 
 ## Atlantis Depths
 
 
 ```{r}
-# IMPORTANT: what are your Atlantis depth layer thicknesses? As a vector starting from the deepest layer
-atlantis_z <- c(-1200,-650,-350,-100,-50,-50,0)
+# IMPORTANT: what are your Atlantis depth layer thicknesses?
+# atlantis_z <- c(-1200,-650,-350,-100,-50,-50,0)
+atlantis_z <- c(-50,-50,-100,-350,-650,-1200)
 ```
 
 ```{r,echo=F}
-tibble(dz=rev(c(atlantis_z,-1)),lyr=8:1) %>% 
+tibble(dz=c(0,atlantis_z,-1),lyr=8:1) %>% 
   ggplot(aes(dz,x=1,fill=factor(lyr)))+
   geom_col(col='black')+
   scale_fill_brewer(palette="PuBu",direction = -1,guide="none")+
@@ -317,12 +318,12 @@ tibble(dz=rev(c(atlantis_z,-1)),lyr=8:1) %>%
 # small function to build enough depth layers for each box, starting with the defined layers above
 # in this function, botz is the bottom depth given for each box, which is available in the .bgm file 
 build_Atlantis_depths <- function(botz,lyrs){
-  # bottom of each layer, starting from deepest
-  lyrbot<-rev(cumsum(rev(lyrs)))
+  # bottom of each layer, starting from shallowest
+  lyrbot<-cumsum(lyrs)
   # layers to use are all those that are shallower than the given botz
   lyr_vec <- lyrbot[lyrbot>botz]
-  # the depth of the first layer is equal to botz
-  lyr_vec <- c(botz,lyr_vec)
+  # the depth of the deepest layer is equal to botz
+  lyr_vec <- c(lyr_vec,botz)
   # in Atlantis, each box has the same number of depth layers, but some layers have zero thickness
   # so we have to pad with zeroes to make all boxes have the same number of layers
   nzeroes <- length(lyrs)-length(lyr_vec)
@@ -341,17 +342,18 @@ atlantis_depths <- atlantis_bgm$boxes %>% select(.bx0,botz) %>%
   unnest(cols=c(maxz)) %>% 
   # add a minimum depth for each layer
   group_by(.bx0) %>% 
-  mutate(minz=lead(maxz,1,default = 0),atlantis_layer=1:length(atlantis_z)) %>% 
+  mutate(minz=lag(maxz,1,default = 0),atlantis_layer=1:length(atlantis_z)) %>% 
   # add a layer thickness calculation
   mutate(dz=minz-maxz) %>% 
   # "dummy" layers (layers too deep for a given Atlantis box) should have minz and dz=0
   mutate(minz=ifelse(maxz==0,0,minz),dz=ifelse(maxz==0,0,dz)) %>% 
   # the sediment layer has thickness 1m and is always the highest numbered layer for each box
-  group_by(.bx0) %>% 
-  mutate(dz=c(dz[1:(length(dz)-1)],1)) %>% 
-  ungroup() %>% 
+  # NOTE: 03/22/21 OWEN IS REMOVING THE SEDIMENT LAYER FOR NOW BECAUSE IT GETS ADDED LATER
+  # group_by(.bx0) %>% 
+  # mutate(dz=c(dz[1:(length(dz)-1)],1)) %>% 
+  # ungroup() %>% 
   # filter out all the zero-thickness layers and clean up
-  filter(dz!=0) %>% 
+  # filter(dz!=0) %>% 
   select(.bx0,atlantis_layer,minz,maxz,dz)
 
 # face depths (for later flux calcs)
