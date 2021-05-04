@@ -394,13 +394,15 @@ library(angstroms)
 # read in ROMS from west coast
 
 romsdepths <- romshcoords(romsfile, S = "Cs_r", depth = "h")
+romsdepths <- subset(romsdepths, dim(romsdepths)[3]:1) # angstroms returns depths from shallowest to deepest, while below we extract ROMS variables from deepest to shallowest. flipping here or else it maps ROMS variables upside-down
+
 # view
 # this_layer <- 20 # pick one between 1:42
 # plot(depths[[this_layer]])
 # done
 # using tabularaster to convert to tibble
 # and a indexing template with "by_column" filling
-romsi <- crossing(xi_rho=1:dim(romsdepths)[2],eta_rho=1:dim(romsdepths)[2]) %>% mutate(cellindex=row_number())
+romsi <- crossing(xi_rho=1:dim(romsdepths)[2],eta_rho=1:dim(romsdepths)[1]) %>% arrange(-eta_rho) %>% mutate(cellindex=row_number()) # making sure that the join by cellindex below is correct - doing this for consistency with the way tabularaster::as_tibble() unpacks the raster cells 
 romsdepthsdf <- as_tibble(romsdepths,dim=F) %>% 
   arrange(cellindex) %>% 
   left_join(romsi,by='cellindex') %>% 
