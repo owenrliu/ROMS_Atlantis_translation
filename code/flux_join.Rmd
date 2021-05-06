@@ -366,7 +366,8 @@ face_depths <- faces %>%
   mutate(right_area=length*dz) %>% 
   select(-dz) %>% 
   # area of the face is the average area, maintaining NAs (if one box is deeper than its neighbor, no flux)
-  mutate(face_area=(left_area+right_area)/2)
+  rowwise() %>%
+  mutate(face_area=min(left_area, right_area)) # I think this should be the area of the smaller face instead of the average of the two? Imagine a box to have 6 layers, and its adjacent box only 2. The 4 layers closest to the bottom of the deep box do not communicate with the shallower adjacent box (because layers 3-6 do not exists in the shallow box). 
 ```
 
 Alternatively, the depth layers can be pulled directly from the initial conditions file for Atlantis (if this has already been build). You don't need to do this if you've added your own manual Atlantis depth vector in the previous step.
@@ -580,9 +581,9 @@ Map of surface salinity for this time slice. Gray boxes are outside ROMS domain 
 
 ```{r}
 boxes_roms_salt_temp %>% 
-  filter(atlantis_layer!=7) %>% 
+  #filter(atlantis_layer!=7) %>% 
   group_by(.bx0) %>% 
-  slice_max(atlantis_layer) %>% 
+  slice_min(atlantis_layer) %>% 
   ungroup() %>% 
   full_join(atlantis_sf,by='.bx0') %>% 
   st_as_sf() %>% 
@@ -690,7 +691,7 @@ test_u_albi <- faces_roms_u %>%
   # join with angle information for the faces, to be used later for difference between uv and face
   left_join(faces_sf_albi) %>%
   # join area of each face (averaged between that layer of left and right-side boxes)
-  left_join(face_depths_rev)%>%
+  left_join(face_depths)%>%
   # take mean u per u point per layer per face
   group_by(.fx0,length,atlantis_layer,face_area,face_angle,xi_u,eta_u) %>%
   mutate(meanu=map_dbl(uvec,mean)) %>% 
@@ -703,7 +704,7 @@ test_v_albi <- faces_roms_v %>%
   # join with angle information for the faces, to be used later for difference between uv and face
   left_join(faces_sf_albi) %>%
   # join area of each face (averaged between that layer of left and right-side boxes)
-  left_join(face_depths_rev) %>% 
+  left_join(face_depths) %>% 
   # take mean v per v point per layer per face
   group_by(.fx0,length,atlantis_layer,face_area,face_angle,xi_v,eta_v) %>%
   mutate(meanv=map_dbl(vvec,mean)) %>% 
@@ -744,7 +745,8 @@ Using the above-calculated fluxes, "close" the flux budget for each Atlantis box
 ```{r}
 # Join left and right boxes from bgm
 fluxes <- fluxes %>% 
-  left_join(face_depths)
+  left_join(face_depths %>% select(-sine,-cosine))
+# at the moment, there are depth layers of some faces with no gross flux across them. Face 0, for example, is shared by boxes 59 and 60 as deep as layer 5. However, there are no u or v points in the buffer of face 0 that go as deep as layer 5. This kind of inconsistencies will keep happening, and it should be fine as long as we keep an eye on them (e.g., for face 0, what is the flux across layer 5 then? 0 or NA?).
 
 # Summarise fluxes by face and box. Remember that L-R flow is negative, RL flow is positive
 # Therefore, we'll use the "left" box of each face to summarise fluxes
@@ -762,19 +764,97 @@ box_fluxes_R <- fluxes %>%
   rename(box=right)
 ```
 
-Now, join the fluxes together, and find the net flow. Close the budget by introducing downwelling or upwelling:
-* If flow is converging (net positive change in flow in the surface Atlantis box), introduce vertical flux downward in to the next layer
-* If flow is diverging (net negative change in flow in the surface Atlantis box), introduce vertical flux upwards from the next layer
+The bit below is just to help Albi visualise things - and for future reference.
 
+1. Atlantis convention: across each face, a flux LR is always negative, and a RL flux always positive.
+2. Considering a focal box $b$, it makes sense to think of a flux going out of the box as negative (i.e. a loss of water from $b$), and a flux coming into the box as positive (i.e. a gain in water in $b$).
+3. How do we couple 1 and 2? It would work okay if the focal box was always to the left of the faces that sorround it, or in other words if the orientation of the faces was always counterclockwise. This is not the case, probably because adjacent boxes share the same faces, and a face can have either one or the other box to its left, not both (remember, a face has a fixed orientation from p1 to p2, so right and left are always the same for a given face).
+4. Let's focus on $b$. Let's find all the faces that delimit $b$. For all these faces, we know what boxes are to their left and to their right, from the BGM. So, for faces that have $b$ to their left, a LR flux across a face is indeed a loss of water from $b$. For faces that have $b$ to their right, instead, a LR flux across the face (which is always negative by convention) actually represents water moving into $b$. So as far as $b$ is concerned, that flux is, in fact, positive, and its sign needs to be changed.
+```{r}
+set.seed(42)
+focal_box <- sample(fluxes$left,1)
+
+testL <- fluxes %>% filter(left == focal_box) %>% mutate(color = "focal_box_to_left")
+testR <- fluxes %>% filter(right == focal_box) %>% mutate(color = "focal_box_to_right")
+
+face_colors <- rbind((testL %>% select(.fx0, color)), (testR %>% select(.fx0, color))) %>% distinct()
+focal_faces <- faces_sf %>% inner_join(face_colors)
+
+ggplot()+
+  geom_sf(data = focal_faces, aes(color = color))+
+  theme_minimal()+
+  labs(title=paste("Faces delimiting box", focal_box, sep = " "))
+```
+Some boxes are open, they might be the ones at the edges of the ROMS domain and have no $u$ and $v$ points around them.
+
+Now, join the fluxes together, and find the net flow. Close the budget by introducing downwelling or upwelling:
+
+* If flow is converging (net positive change in flow in the surface Atlantis box), introduce vertical flux downward in to the next layer
+* If flow is diverging (net negative change in flow in the surface Atlantis box), introduce vertical flux upwards from the next layer.
+
+Upwelling and downwelling represent $w$. The input to HydroConstruct seems to need $w$ expressed as some variation of the following language (from SEAP and Hawaii, respectively):
+
+|float verticalflux(time, boxes, level) ;
+|		verticalflux:units = "m3/s" ;
+|		verticalflux:_FillValue = -999.f ;
+|		verticalflux:long_name = "vertical velocity averaged over volume (velocity*area)" ;
+|		verticalflux:positive = "upwards" ;
+
+|float verticalflux(time, boxes, level) ;
+|		verticalflux:long_name = "vertical flux averaged over floor of box" ;
+|		verticalflux:positive = "upwards" ;
+|		verticalflux:units = "m/s" ;
+|		verticalflux:_FillValue = -1.e+21f ;
+
+So it sounds like producing the net flux should be the right thing to do, and the units are the same as our fluxes. Double-check this (e.g. that we do not actually need it by unit space for some reason).
+
+Notably, HydroConstruct seems to consider upward fluxes as positive.
 ```{r}
 box_fluxes <- box_fluxes_L %>% 
-  left_join(box_fluxes_R,by=c('box','atlantis_layer')) %>% 
+  full_join(box_fluxes_R,by=c('box','atlantis_layer')) %>% 
   # net flow
   rowwise() %>% 
-  mutate(net_change=sum(totflux_in_from_right,totflux_in_from_left)) %>% 
+  mutate(net_flux=sum(totflux_in_from_right,totflux_in_from_left)) %>% 
   # hmm, trying to figure out how to do this next step
   group_by(box) %>% 
-  # net downwelling (positive is down), converted to Sv (1x10^6 m3/s)
-  mutate(net_downwelling=cumsum(net_change)*1e-6)
+  # net upwelling in m3/s - minus sign because HydroConstruct needs positive up
+  mutate(w=-cumsum(net_flux)) %>%
+  ungroup() %>%
+  select(-totflux_in_from_right, -totflux_in_from_left) %>%
+  left_join(select(atlantis_sf, .bx0, area), by = c("box" = ".bx0")) %>%
+  st_as_sf(sf_column_name = "geometry")
 ```
 
+We can plot this to visualise.
+```{r}
+box_fluxes  %>% 
+  slice_min(atlantis_layer) %>%
+  ggplot()+
+  geom_sf(aes(fill = w))+
+  scale_fill_viridis()+
+  theme_minimal()+
+  labs(fill="Vertical transport (w) m3/s",title="Vertical fluxes through the bottom of \n Atlantis layers from ROMS/Atlantis")
+```
+
+## Correction for hyperdiffusion
+
+The current workflow does not account for the correction for hyperdiffusion that happens when running Hydroconstruct. 
+
+For now, let's apply a coarse correction for hyperdiffusion in the form of flux/area (i.e. type 1 correction in HydroConstruct), and recalculate $w$ accounting for that. 
+```{r}
+box_fluxes <- box_fluxes %>%
+  group_by(box) %>%
+  mutate(hyperdiff_corrected = net_flux/area,
+         w_corrected = -cumsum(hyperdiff_corrected))
+```
+
+Visualise.
+```{r}
+box_fluxes  %>% 
+  slice_min(atlantis_layer) %>%
+  ggplot()+
+  geom_sf(aes(fill = w_corrected))+
+  scale_fill_viridis()+
+  theme_minimal()+
+  labs(fill="Vertical transport (w) m3/s",title="Vertical fluxes through the bottom of \n Atlantis layers, after correction for hyperdiffusion")
+```
