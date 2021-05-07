@@ -367,7 +367,15 @@ face_depths <- faces %>%
   select(-dz) %>% 
   # area of the face is the average area, maintaining NAs (if one box is deeper than its neighbor, no flux)
   rowwise() %>%
-  mutate(face_area=min(left_area, right_area)) # I think this should be the area of the smaller face instead of the average of the two? Imagine a box to have 6 layers, and its adjacent box only 2. The 4 layers closest to the bottom of the deep box do not communicate with the shallower adjacent box (because layers 3-6 do not exists in the shallow box). 
+  mutate(face_area=ifelse((left_area>0 & right_area >0), min(left_area, right_area), NA)) # I think this should be the area of the smaller face instead of the average of the two? Imagine a box to have 6 layers, and its neighboring box only 2 (e.g. along a steep depth gradient). The 4 layers starting from the bottom of the deep box (layers 3-6) do not communicate with the adjacent shallow box because layers 3-6 do not exists in the shallow box. In other words, mean(area_of_face_at_layer_6_in_deep_box, 0) = area_of_face_6_in_deep_box/2, which makes no sense for the shallow box since layer 6 does not exist there. Also if there is no contact bertween two faces at a certain depth (i.e. one of the areas is 0), area in common is NA. Else, there will be vertical fluxes for depth layers that do not exist.
+
+# | box1  ||  box2  | # layer 1: same face surface for box1 and box2 (surface = min(surface1, surface2))
+# '-------'|        | # layer 2: face surface of box2 is larger (i.e. deeper), but both boxes have face surface at this depth (surface = min(surface1, surface2))
+#          |        | # layers 3-6: only box2 has these layers, so there is no face surface in common between the two boxes (surface = NA)
+#          |        |
+#          |        |
+#          |________|
+
 ```
 
 Alternatively, the depth layers can be pulled directly from the initial conditions file for Atlantis (if this has already been build). You don't need to do this if you've added your own manual Atlantis depth vector in the previous step.
@@ -404,7 +412,7 @@ romsdepths <- subset(romsdepths, dim(romsdepths)[3]:1) # angstroms returns depth
 # using tabularaster to convert to tibble
 # and a indexing template with "by_column" filling
 romsi <- crossing(xi_rho=1:dim(romsdepths)[2],eta_rho=1:dim(romsdepths)[1]) %>% arrange(-eta_rho) %>% mutate(cellindex=row_number()) # making sure that the join by cellindex below is correct - doing this for consistency with the way tabularaster::as_tibble() unpacks the raster cells 
-romsdepthsdf <- as_tibble(romsdepths,dim=F) %>% 
+romsdepthsdf <- tabularaster::as_tibble(romsdepths,dim=F) %>% 
   arrange(cellindex) %>% 
   left_join(romsi,by='cellindex') %>% 
   set_names(c("romsdepth","cellindex","xi_rho","eta_rho")) %>% 
@@ -655,7 +663,7 @@ Do some trigonometry (yikes!) to calculate actual vectors of flow across each fa
 
 ```
 
-### Albi's alternative approach for calculating fluxes. 
+## Albi's alternative approach for calculating fluxes. 
 
 The premise: I cannot seem to understand how sine and cosine of the faces are calculated in the BGM file. More specifically I am confused as to why all faces have *either* positive sine __and__ positive cosine *or* negative sine __and__ negative cosine (sure faces are oriented in all directions in the 2D plane? This pos/pos neg/neg business is the case for a number of BGM files I could get my hands on, but not for all of them); also, I am unsure about the reference axis used to calculate the angle defined by the faces according to sine and cosine as they are reported in the BGM (that is, it is the angle between the face and what? The North axis? The East axis for consistency with the unit circle? In many examples of BGM files retrieved from bgmfiles::bgmfiles() neither of these seems to be the case). I tried to get in touch with who wrote the BGMeriser package through a CSIRO contact to see if I can understand it from the source code, but I am still waiting for an answer.
 
@@ -771,7 +779,7 @@ The bit below is just to help Albi visualise things - and for future reference.
 3. How do we couple 1 and 2? It would work okay if the focal box was always to the left of the faces that sorround it, or in other words if the orientation of the faces was always counterclockwise. This is not the case, probably because adjacent boxes share the same faces, and a face can have either one or the other box to its left, not both (remember, a face has a fixed orientation from p1 to p2, so right and left are always the same for a given face).
 4. Let's focus on $b$. Let's find all the faces that delimit $b$. For all these faces, we know what boxes are to their left and to their right, from the BGM. So, for faces that have $b$ to their left, a LR flux across a face is indeed a loss of water from $b$. For faces that have $b$ to their right, instead, a LR flux across the face (which is always negative by convention) actually represents water moving into $b$. So as far as $b$ is concerned, that flux is, in fact, positive, and its sign needs to be changed.
 ```{r}
-set.seed(42)
+set.seed(425)
 focal_box <- sample(fluxes$left,1)
 
 testL <- fluxes %>% filter(left == focal_box) %>% mutate(color = "focal_box_to_left")
@@ -792,49 +800,59 @@ Now, join the fluxes together, and find the net flow. Close the budget by introd
 * If flow is converging (net positive change in flow in the surface Atlantis box), introduce vertical flux downward in to the next layer
 * If flow is diverging (net negative change in flow in the surface Atlantis box), introduce vertical flux upwards from the next layer.
 
-Upwelling and downwelling represent $w$. The input to HydroConstruct seems to need $w$ expressed as some variation of the following language (from SEAP and Hawaii, respectively):
+Upwelling and downwelling represent $w$. The input to HydroConstruct seems to need $w$ expressed as some variation of the following language (from NETCDF type input in Hawaii and SEAP, respectively):
 
-|float verticalflux(time, boxes, level) ;
+| float verticalflux(time, boxes, level) ;
 |		verticalflux:units = "m3/s" ;
 |		verticalflux:_FillValue = -999.f ;
 |		verticalflux:long_name = "vertical velocity averaged over volume (velocity*area)" ;
 |		verticalflux:positive = "upwards" ;
-
-|float verticalflux(time, boxes, level) ;
+| 
+| float verticalflux(time, boxes, level) ;
 |		verticalflux:long_name = "vertical flux averaged over floor of box" ;
 |		verticalflux:positive = "upwards" ;
 |		verticalflux:units = "m/s" ;
 |		verticalflux:_FillValue = -1.e+21f ;
 
-So it sounds like producing the net flux should be the right thing to do, and the units are the same as our fluxes. Double-check this (e.g. that we do not actually need it by unit space for some reason).
+So it sounds like producing the net flux should be the right thing to do, and the units are the same as our fluxes. Albi to check whether HydroConstruct turns this into m3/time step (i.e. flux m3/sec * 43200 sec), or if we need to do it before HydroConstruct. Also worth noting that the input for HydroConstruct from Puget Sound and California Current (DAT files, input_type = 9) list values of vertical velocity in [10^-6*m/s]. Can check with Isaac, does m/s mean m3/s or is it flux by unit area [m3/s/m2]? 
 
-Notably, HydroConstruct seems to consider upward fluxes as positive.
+__HydroConstruct seems to consider upward fluxes as positive.__
 ```{r}
 box_fluxes <- box_fluxes_L %>% 
   full_join(box_fluxes_R,by=c('box','atlantis_layer')) %>% 
   # net flow
   rowwise() %>% 
-  mutate(net_flux=sum(totflux_in_from_right,totflux_in_from_left)) %>% 
+  mutate(net_flux=ifelse((totflux_in_from_right == 0 & totflux_in_from_left == 0),NA,sum(totflux_in_from_right,totflux_in_from_left))) %>% # if all fluxes are 0, it means that the current layer does not exist for that box, so set the flux to NA
   # hmm, trying to figure out how to do this next step
   group_by(box) %>% 
   # net upwelling in m3/s - minus sign because HydroConstruct needs positive up
   mutate(w=-cumsum(net_flux)) %>%
   ungroup() %>%
   select(-totflux_in_from_right, -totflux_in_from_left) %>%
-  left_join(select(atlantis_sf, .bx0, area), by = c("box" = ".bx0")) %>%
-  st_as_sf(sf_column_name = "geometry")
+  left_join(select(atlantis_sf, .bx0, area), by = c("box" = ".bx0")) 
 ```
 
 We can plot this to visualise.
 ```{r}
-box_fluxes  %>% 
-  slice_min(atlantis_layer) %>%
+box_fluxes  %>%
+  st_as_sf(sf_column_name = "geometry") %>%
+  na.omit() %>%
+  group_by(box) %>%
+  slice_max(atlantis_layer) %>%
   ggplot()+
   geom_sf(aes(fill = w))+
   scale_fill_viridis()+
   theme_minimal()+
-  labs(fill="Vertical transport (w) m3/s",title="Vertical fluxes through the bottom of \n Atlantis layers from ROMS/Atlantis")
+  labs(fill="Vertical transport (w) m3/s",title="Vertical fluxes through the bottom of \n Atlantis layers - deepest layer")
 ```
+Hard to tell what is sensible here. 
+
+As it stands, we have the issue of closing the budget of the bottom layer for each box. That is, our method allows for water flowing through the bottom of the bottom layer. Options for what we can do about that:
+
+1. Nothing - take the "sure it will go away over a few time steps" approach and see if the model implodes before doing anything else.
+2. Use box 0 to "balance" these fluxes. See discussion [here](https://confluence.csiro.au/display/Atlantis/Hydro+FAQ). Also see the User Guide: *"Box 0 is special because it is set up to have water and nutrient fluxes to nearly all other model boxes. This is set to simulate supply of advective tracers to the oceanic boxes and accommodate any missing water fluxes due to conversion of oceanographic files into Atlantis input files (see chapter 4). While the model is running it also acts as a store for information on any migrating groups currently outside the model domain."*
+
+Box 0 is outside the ROMS domain for CalCurrent for now, so let's put this off.
 
 ## Correction for hyperdiffusion
 
@@ -850,7 +868,9 @@ box_fluxes <- box_fluxes %>%
 
 Visualise.
 ```{r}
-box_fluxes  %>% 
+box_fluxes %>%
+  st_as_sf(sf_column_name = "geometry") %>%
+  na.omit()%>% 
   slice_min(atlantis_layer) %>%
   ggplot()+
   geom_sf(aes(fill = w_corrected))+
