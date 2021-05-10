@@ -582,7 +582,7 @@ Map of surface salinity for this time slice. Gray boxes are outside ROMS domain 
 boxes_roms_salt_temp %>% 
   filter(atlantis_layer!=7) %>% 
   group_by(.bx0) %>% 
-  slice_max(atlantis_layer) %>% 
+  slice_min(atlantis_layer) %>% 
   ungroup() %>% 
   full_join(atlantis_sf,by='.bx0') %>% 
   st_as_sf() %>% 
