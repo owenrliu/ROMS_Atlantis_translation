@@ -554,7 +554,9 @@ Now that we have $\rho$, $u$, $v$, and $w$ points matched to Atlantis boxes, fac
 # returns an array with all of the data from the one time-slice of ROMS
 pull_var <- function(variable){
   grd <- roms_vars %>% filter(name==variable) %>% pluck('grd')
-  dat <- roms %>% activate(grd) %>% hyper_array()
+  dat <- roms %>% activate(grd) %>% 
+    #hyper_filter(ocean_time = index == time_step) %>% # something like this to filter time steps. It would need time_step to be an argument of this function, and then to make a function below t pull ther static variables from one step at a time. See Albi's code for Ecopath stuff.
+    hyper_array()
   return(dat[[variable]])
 }
 # index into the variable array using xi, eta, and s indices
