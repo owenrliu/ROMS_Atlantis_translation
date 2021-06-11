@@ -731,9 +731,7 @@ test_uv_albi <- test_u_albi %>%
   mutate(diff_angle = uv_angle - face_angle, # beta - alpha
          angle_new = ifelse((diff_angle>=0 & diff_angle<=pi) | (diff_angle<0 & diff_angle>=-pi), diff_angle, # add or subtract 2*pi as needed (9)see above)
                             ifelse(diff_angle < -pi, diff_angle+2*pi, diff_angle-2*pi)),
-         scalar = ifelse(angle_new>=0, 1, -1), # work out a scalar that is negative for LR fluxes and positive for RL fluxes
-         new_vec = uv_mag * scalar) # apply the scalar to the flux. Am I missing a step here? Do I need to multiply by cos? Check
-
+         orthogonal_flux = uv_mag * sin(angle_new)) # get the component of the flux that is perpendicular to the face. Because of the angle transformation (+/- 2*pi), multiplying by the sine of the angle between uv and the face returns the correct sign for the flux: negative for LR, positive for RL. 
 ```
 
 Results are different from the original version from Owen, so this will need more work / double-checking.
@@ -743,7 +741,7 @@ This left and right issue will be the tricky part. After this, it should be only
 ```{r}
 
 fluxes <- test_uv_albi %>% 
-  mutate(gross = new_vec * face_area) %>%
+  mutate(gross = orthogonal_flux * face_area) %>%
   select(.fx0, atlantis_layer, gross)
 
 ```
