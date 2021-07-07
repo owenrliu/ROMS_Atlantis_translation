@@ -138,7 +138,8 @@ h <- roms %>% activate(h_grd) %>% hyper_tibble() %>% select(xi_rho,eta_rho,h)
 # find appropriate ROMS ncdf grid for the rho points
 latlon_rhogrd <- roms_vars %>% filter(name=="lat_rho") %>% pluck('grd')
 # pull the lon/lats
-roms_rho <- roms %>% activate(latlon_rhogrd) %>% hyper_tibble() %>% select(lon_rho,lat_rho,xi_rho,eta_rho) %>% 
+roms_rho <- roms %>% activate(latlon_rhogrd) %>% hyper_tibble() %>%
+  select(lon_rho,lat_rho,xi_rho,eta_rho) %>% 
   mutate(rhoidx=row_number()) # add index
 ```
 
@@ -354,6 +355,7 @@ atlantis_depths <- atlantis_bgm$boxes %>% select(.bx0,botz) %>%
   # ungroup() %>% 
   # filter out all the zero-thickness layers and clean up
   # filter(dz!=0) %>% 
+  ungroup() %>% 
   select(.bx0,atlantis_layer,minz,maxz,dz)
 
 # face depths (for later flux calcs)
@@ -602,6 +604,161 @@ boxes_roms_salt_temp %>%
   scale_fill_viridis()+
   labs(fill="Salinity",title="Mean Surface Salinity from\njoined ROMS/Atlantis")
 ```
+
+# Alternative: Static Variables from Depth Interpolation
+
+An alternative approach: use cubic splines to interpolate the ROMS grid onto a 1m vertical resolution. Then we can match the Atlantis box depths more precisely to ROMS data by depth.
+
+## Depth Interpolation
+
+First, this is a simple function to wrap `spline` and apply it to a vector of ROMS depths and ROMS environmental data. The function interpolates the given ROMS variable across 1m depth intervals using a cubic spline. It returns a tibble with depths and interpolated values.
+
+```{r}
+interp_foo <- function(romsdepths,romsvar) {
+    depths_out <- seq(round(min(romsdepths)),0,by=1) # 1m interpolation, starting from deepest
+    interp <- spline(romsdepths,romsvar,xout=depths_out) %>% pluck('y')
+    return(tibble(depth=depths_out,val=interp))
+}
+```
+
+Now, we write a function that:
+
+* Pulls a variable from ROMS
+* Interpolates the variable
+* Returns a tibble of interpolated variable values for each ROMS grid cell
+
+```{r}
+interpolate_var <- function(variable){
+  grd <- roms_vars %>% filter(name==variable) %>% pluck('grd')
+  # pull the env data
+  dat <- roms %>% activate(grd) %>%
+    hyper_tibble()
+  # interpolate the env data
+  interp_dat <- dat %>% 
+    dplyr::select(xi_rho,eta_rho,!!variable) %>% 
+    nest(data=c(!!variable))%>% 
+    mutate(evar=purrr::map(data,~.[[1]])) %>% 
+    left_join(romsdepthsdf,by=c('xi_rho','eta_rho')) %>% 
+    left_join(roms_rho,by=c('xi_rho','eta_rho')) %>% 
+    mutate(interp = purrr::map2(romsdepth,evar,interp_foo)) %>% 
+    dplyr::select(-data,-evar,-romsdepth)
+  return(interp_dat)
+}
+```
+
+```{r}
+# test
+salt_interp <- interpolate_var('salt')
+temperature_interp <- interpolate_var('temp') 
+glimpse(salt_interp)
+glimpse(temperature_interp)
+# test plot
+salt_interp %>% 
+  pluck("interp",1) %>% 
+  ggplot(aes(val,depth))+
+  geom_point(size=0.5)+
+  labs(x="salinity",y="depth (m)")
+temperature_interp %>% 
+  pluck("interp",1) %>% 
+  ggplot(aes(val,depth))+
+  geom_point(size=0.5)+
+  labs(x="temperature",y="depth (m)")
+
+# y1 <- test$salt[[1]]
+# x1 <- test$romsdepth[[1]]
+# int1 <- interp_foo(x1,y1)
+# ggplot(int1,aes(depth,val))+
+#   geom_point()
+```
+The interpolation seems to work. Now we use these data to extract values for Atlantis box layers. We do not need to use the depth-layer matching here, because we have interpolated the ROMS data.
+
+## Match Interpolated Data to Atlantis
+
+We use the `atlantis_depths` tibble that we build above to 
+
+```{r}
+# join the atlantis depth information with the joined Atlantis boxes/rho points
+# This is a matching key for all atlantis boxes and layers to the ROMS rho points that fall within them
+boxes_rho_thin <- boxes_rho_join %>% 
+  st_set_geometry(NULL) %>% 
+  dplyr::select(.bx0,xi_rho,eta_rho,rhoidx) %>% 
+  drop_na()
+boxes_rho_join_with_depth <- atlantis_depths %>% 
+  left_join(boxes_rho_thin,by=c(".bx0")) %>% 
+  ungroup() %>% 
+  drop_na()
+
+```
+
+The next function takes an interpolated dataset (in our case, `salt_interp` or `temperature_interp` from the previous step), a set of ROMS rho points (defined by `xi_rho` and `eta_rho`, and therefore by the indexing integer `rhoidx`), and a minimum and maximum depth, and extracts the *mean* of an environmental variable across that depth range and across all rho points, according to the interpolated data.
+
+```{r}
+match_interpolated_data <- function(interp_dat,rhoidx_vec,minz,maxz){
+  interp_var<- interp_dat %>% 
+    # filter to the ROMS coordinate of interest
+    filter(rhoidx %in% rhoidx_vec) %>% 
+    # filter depths
+    mutate(interp_within_depths=purrr::map(interp,function(df) df %>% filter(between(depth,maxz,minz)))) %>% 
+    # unpack the interpolated data and calculate a mean across relevant rho points and depths
+    pluck('interp_within_depths') %>% 
+    bind_rows() %>% 
+    pluck('val') %>% 
+    mean(na.rm=T)
+  
+  # if(nrow(interp_var)==0) return(NA)
+  
+  # out <- interp_var %>% 
+  #   # pull the depth-interpolated environmental variable
+  #   pluck('interp',1)
+  # 
+  # # if the depths requested fall outside the range of that ROMS cell, return NA
+  # if(minz<min(out$depth)) return(NA)
+  # 
+  # else {
+  #   out <- out %>% 
+  #     # filter the environmental variable to the requested depths
+  #     filter(between(depth,maxz,minz)) %>% 
+  #     # finally, calculate a mean and return the single value
+  #     pluck('val') %>% 
+  #     mean()
+  #   return(out)
+  # }
+}
+
+# try it out
+# match_interpolated_data(interp_dat=salt_interp,xi=73,eta=65,minz=0,maxz=-50)
+# match_interpolated_data(interp_dat=salt_interp,xi=100,eta=144,minz=0,maxz=-50)
+# match_interpolated_data(interp_dat=salt_interp,xi=92,eta=177,minz=-200,maxz=-343.32)
+# 
+```
+
+Apply the function to all Atlantis boxes and layers
+
+```{r}
+# make vectors of rho point indices
+boxes_depths_rhopts <- boxes_rho_join_with_depth %>% 
+  select(-dz) %>% 
+  group_by(.bx0,atlantis_layer,minz,maxz) %>% 
+  nest(rhopts=c(xi_rho,eta_rho,rhoidx)) %>% 
+  mutate(rhovec=map(rhopts,~pluck(.,'rhoidx')))
+```
+
+```{r}
+boxes_salt_temperature_interp <- boxes_depths_rhopts %>% 
+  # apply the function to the interpolated salinity data
+  mutate(salt_mean=purrr::pmap_dbl(list(rhoidx_vec=rhovec,minz=minz,maxz=maxz),match_interpolated_data,interp_dat=salt_interp)) %>% 
+  mutate(temperature_mean=purrr::pmap_dbl(list(rhoidx_vec=rhovec,minz=minz,maxz=maxz),match_interpolated_data,interp_dat=temperature_interp))
+glimpse(boxes_salt_temperature_interp)
+```
+
+A weird plot
+
+```{r}
+boxes_salt_temperature_interp %>% 
+  ggplot(aes(atlantis_layer,temperature_mean))+
+  geom_point()
+```
+
 
 # Calculate Fluxes
 
