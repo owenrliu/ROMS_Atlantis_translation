@@ -698,7 +698,7 @@ match_interpolated_data <- function(interp_dat,rhoidx_vec,minz,maxz){
     # filter to the ROMS coordinate of interest
     filter(rhoidx %in% rhoidx_vec) %>% 
     # filter depths
-    mutate(interp_within_depths=purrr::map(interp,function(df) df %>% filter(between(depth,maxz,minz)))) %>% 
+    mutate(interp_within_depths=purrr::map(interp, ifelse(maxz==0,function(df) df %>% mutate(val = NA), function(df) df %>% filter(between(depth,maxz,minz))))) %>% # write out NAs if the thickness of the depth layer is 0 m, i.e. for non-existing Atlantis layers
     # unpack the interpolated data and calculate a mean across relevant rho points and depths
     pluck('interp_within_depths') %>% 
     bind_rows() %>% 
@@ -759,6 +759,16 @@ boxes_salt_temperature_interp %>%
   geom_point()
 ```
 
+## Compare with results from interval matching
+
+```{r}
+boxes_roms_salt_temp %>% 
+  left_join(boxes_salt_temperature_interp %>% dplyr::select(.bx0,atlantis_layer,salt_mean,temperature_mean), by = c(".bx0","atlantis_layer")) %>% dplyr::select(-minz,-maxz) %>% set_names(c(".bx0","atlantis_layer","salt_interval","temp_interval","salt_interp","temp_interp")) %>%
+  ggplot(aes(salt_interval,salt_interp,color=atlantis_layer))+
+  geom_point()+
+  geom_abline(intercept=0,slope=1)+
+  theme_minimal()
+```
 
 # Calculate Fluxes
 
