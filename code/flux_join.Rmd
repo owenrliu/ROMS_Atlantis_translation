@@ -745,7 +745,7 @@ boxes_depths_rhopts <- boxes_rho_join_with_depth %>%
 
 ```{r}
 boxes_salt_temperature_interp <- boxes_depths_rhopts %>% 
-  # apply the function to the interpolated salinity data
+  # apply the function to the interpolated salinity and temperature data
   mutate(salt_mean=purrr::pmap_dbl(list(rhoidx_vec=rhovec,minz=minz,maxz=maxz),match_interpolated_data,interp_dat=salt_interp)) %>% 
   mutate(temperature_mean=purrr::pmap_dbl(list(rhoidx_vec=rhovec,minz=minz,maxz=maxz),match_interpolated_data,interp_dat=temperature_interp))
 glimpse(boxes_salt_temperature_interp)
