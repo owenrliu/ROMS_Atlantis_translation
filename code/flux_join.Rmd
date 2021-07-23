@@ -159,8 +159,8 @@ latlon_ugrd <-roms_vars %>% filter(name=="lat_u") %>% pluck('grd')
 latlon_vgrd <-roms_vars %>% filter(name=="lat_v") %>% pluck('grd')
 
 # pull the lon/lats
-roms_u <- roms %>% activate(latlon_ugrd) %>% hyper_tibble() %>% select(lon_u,lat_u,xi_u,eta_u)
-roms_v <- roms %>% activate(latlon_vgrd) %>% hyper_tibble() %>% select(lon_v,lat_v,xi_v,eta_v)
+roms_u <- roms %>% activate(latlon_ugrd) %>% hyper_tibble() %>% select(lon_u,lat_u,xi_u,eta_u) %>% mutate(uidx=row_number())
+roms_v <- roms %>% activate(latlon_vgrd) %>% hyper_tibble() %>% select(lon_v,lat_v,xi_v,eta_v) %>% mutate(vidx=row_number())
 ```
 
 For distance calculations and spatial mapping, we want to convert lat/lon coordinates to the same coordinate reference system that is used to represent the Atlantis boxes. We do this using the `sf` package, adding the converted XY coordinates to the indices we just created.
@@ -363,13 +363,14 @@ atlantis_depths <- atlantis_bgm$boxes %>% select(.bx0,botz) %>%
 face_depths <- faces %>% 
   left_join(atlantis_depths %>% select(.bx0,atlantis_layer,dz),by=c("left"=".bx0")) %>% 
   mutate(left_area=length*dz) %>% 
-  select(-dz) %>% 
+  rename(dz_left=dz) %>% 
   left_join(atlantis_depths %>% select(.bx0,atlantis_layer,dz),by=c("right"=".bx0","atlantis_layer")) %>% 
   mutate(right_area=length*dz) %>% 
-  select(-dz) %>% 
+  rename(dz_right=dz) %>% 
   # area of the face is the average area, maintaining NAs (if one box is deeper than its neighbor, no flux)
   rowwise() %>%
-  mutate(face_area=ifelse((left_area>0 & right_area >0), min(left_area, right_area), NA)) # I think this should be the area of the smaller face instead of the average of the two? Imagine a box to have 6 layers, and its neighboring box only 2 (e.g. along a steep depth gradient). The 4 layers starting from the bottom of the deep box (layers 3-6) do not communicate with the adjacent shallow box because layers 3-6 do not exists in the shallow box. In other words, mean(area_of_face_at_layer_6_in_deep_box, 0) = area_of_face_6_in_deep_box/2, which makes no sense for the shallow box since layer 6 does not exist there. Also if there is no contact bertween two faces at a certain depth (i.e. one of the areas is 0), area in common is NA. Else, there will be vertical fluxes for depth layers that do not exist.
+  mutate(dz_max = max(dz_left,dz_right),
+         face_area=ifelse((left_area>0 & right_area >0), min(left_area, right_area), NA)) # I think this should be the area of the smaller face instead of the average of the two? Imagine a box to have 6 layers, and its neighboring box only 2 (e.g. along a steep depth gradient). The 4 layers starting from the bottom of the deep box (layers 3-6) do not communicate with the adjacent shallow box because layers 3-6 do not exists in the shallow box. In other words, mean(area_of_face_at_layer_6_in_deep_box, 0) = area_of_face_6_in_deep_box/2, which makes no sense for the shallow box since layer 6 does not exist there. Also if there is no contact bertween two faces at a certain depth (i.e. one of the areas is 0), area in common is NA. Else, there will be vertical fluxes for depth layers that do not exist.
 
 # | box1  ||  box2  | # layer 1: same face surface for box1 and box2 (surface = min(surface1, surface2))
 # '-------'|        | # layer 2: face surface of box2 is larger (i.e. deeper), but both boxes have face surface at this depth (surface = min(surface1, surface2))
@@ -789,6 +790,146 @@ faces_roms_v<- faces_v_fulljoin %>%
 glimpse(faces_roms_v)
 ```
 
+## Alternative approach with vertical interpolation
+
+Use a modified version of the functions above as a first pass (here we are looking at $u$ and $v$ points, not $\rho$). I can get back to this later and condense these functions and those above so that they perform vertical interpolation and then matching at $\rho$ as well as $u$ and $v$ points depending on the desired variable.
+
+Remember, that here we assume that $u$ and $v$ have the same h as $\rho$ points.
+```{r}
+interpolate_velocity <- function(variable){
+  grd <- roms_vars %>% filter(name==variable) %>% pluck('grd')
+  # pull the velocity data
+  dat <- roms %>% activate(grd) %>%
+    hyper_tibble()
+  # interpolate the velocity data
+  if(variable == "u") {
+    interp_dat <- dat %>% 
+      dplyr::select(xi_u,eta_u,!!variable) %>% 
+      nest(data=c(!!variable))%>% 
+      mutate(evar=purrr::map(data,~.[[1]])) %>% 
+      left_join(romsdepthsdf,by=c('xi_u'='xi_rho','eta_u'='eta_rho')) %>% 
+      left_join(roms_u,by=c('xi_u','eta_u')) %>% 
+      mutate(interp = purrr::map2(romsdepth,evar,interp_foo)) %>% 
+      dplyr::select(-data,-evar,-romsdepth)
+  } else {
+    interp_dat <- dat %>% 
+      dplyr::select(xi_v,eta_v,!!variable) %>% 
+      nest(data=c(!!variable))%>% 
+      mutate(evar=purrr::map(data,~.[[1]])) %>% 
+      left_join(romsdepthsdf,by=c('xi_v'='xi_rho','eta_v'='eta_rho')) %>% 
+      left_join(roms_v,by=c('xi_v','eta_v')) %>% 
+      mutate(interp = purrr::map2(romsdepth,evar,interp_foo)) %>% 
+      dplyr::select(-data,-evar,-romsdepth)
+  }
+  return(interp_dat)
+}
+```
+
+Pull u and v.
+```{r}
+# test
+u_interp <- interpolate_velocity('u')
+v_interp <- interpolate_velocity('v')
+glimpse(u_interp)
+glimpse(v_interp)
+# test plot
+u_interp %>% 
+  pluck("interp",1) %>% 
+  ggplot(aes(val,depth))+
+  geom_point(size=0.5)+
+  labs(x="u eastward",y="depth (m)")
+v_interp %>% 
+  pluck("interp",1) %>% 
+  ggplot(aes(val,depth))+
+  geom_point(size=0.5)+
+  labs(x="v northward",y="depth (m)")
+```
+
+For the fluxes we are joining with faces, not with boxes. Also we need to keep this separate between u and v points, as the joins seem to be different. The depth of a face is relative to the box that is on either side of it though. 
+
+Use the face_depths data frame calculated above.
+```{r}
+# join the atlantis depth information with the joined Atlantis faces/u and v points
+# This is a matching key for all atlantis boxes and layers to the ROMS v points that fall around them in the buffer
+# note that this is a separate process for u and v
+
+faces_u_thin <- faces_u_join %>%
+  st_set_geometry(NULL) %>%
+  select(.fx0,xi_u,eta_u,uidx) %>%
+  drop_na()
+faces_u_join_with_depth <- face_depths %>%
+  left_join(faces_u_thin, by = c(".fx0")) %>%
+  ungroup() %>%
+  drop_na() %>% # turn this on or off depending on whether we want to have NA fluxes in non-existing layers or not, cannot recall what HydroCOnstruct wants
+  select(.fx0,atlantis_layer,dz_max,xi_u,eta_u,uidx,face_area) %>%
+  group_by(uidx,.fx0) %>%
+  mutate(maxz=-cumsum(dz_max),minz=-lag(-maxz,default=0)) %>%
+  ungroup()%>%
+  select(-dz_max)
+
+# again for v
+faces_v_thin <- faces_v_join %>%
+  st_set_geometry(NULL) %>%
+  select(.fx0,xi_v,eta_v,vidx) %>%
+  drop_na()
+faces_v_join_with_depth <- face_depths %>%
+  left_join(faces_v_thin, by = c(".fx0")) %>%
+  ungroup() %>%
+  drop_na() %>%
+  select(.fx0,atlantis_layer,dz_max,xi_v,eta_v,vidx,face_area) %>%
+  group_by(vidx,.fx0) %>%
+  mutate(maxz=-cumsum(dz_max),minz=-lag(-maxz,default=0)) %>%
+  ungroup()%>%
+  select(-dz_max)
+```
+
+Now match the interpolation to the Atlantis layers, depending on depth. Again, this is the same fuction as above but with u and v points. We will want to merge it with the bit above. 
+```{r}
+match_interpolated_velocities <- function(interp_dat,idx_vec,minz,maxz){
+  #idx <- names(interp_dat[grep('idx',names(interp_dat))])
+  interp_var<- interp_dat
+  if('uidx'%in%names(interp_var)){
+    interp_var<-interp_var%>%filter(uidx%in%idx_vec)
+  }else{
+     interp_var<-interp_var%>%filter(vidx%in%idx_vec)}
+  interp_var<-interp_var %>%    # filter depths
+    mutate(interp_within_depths=purrr::map(interp, ifelse(maxz==0,function(df) df %>% mutate(val = NA), function(df) df %>% filter(between(depth,maxz,minz))))) %>% # write out NAs if the thickness of the depth layer is 0 m, i.e. for non-existing Atlantis layers
+    # unpack the interpolated data and calculate a mean across relevant rho points and depths
+    pluck('interp_within_depths') %>% 
+    bind_rows() %>% 
+    pluck('val') %>% 
+    mean(na.rm=T)
+}
+```
+
+Write data frame with u and v point per face, then merge them.
+```{r}
+# make vectors of u point indices
+faces_depths_upts <- faces_u_join_with_depth %>% 
+  group_by(.fx0,atlantis_layer,minz,maxz) %>% 
+  nest(upts=c(xi_u,eta_u,uidx)) %>% 
+  mutate(uvec=map(upts,~pluck(.,'uidx'))) %>%
+  ungroup()
+# and v
+faces_depths_vpts <- faces_v_join_with_depth %>% 
+  group_by(.fx0,atlantis_layer,minz,maxz) %>% 
+  nest(vpts=c(xi_v,eta_v,vidx)) %>% 
+  mutate(vvec=map(vpts,~pluck(.,'vidx'))) %>%
+  ungroup()
+# now join
+faces_depths_uvpts <- faces_depths_upts %>% full_join(faces_depths_vpts, by = c('.fx0','atlantis_layer','maxz','minz','face_area'))
+```
+
+```{r}
+faces_uv_interp <- faces_depths_uvpts %>% 
+  # apply the function to the interpolated salinity and temperature data
+  mutate(u_mean=purrr::pmap_dbl(list(idx_vec=uvec,minz=minz,maxz=maxz),match_interpolated_velocities,interp_dat=u_interp),
+         v_mean=purrr::pmap_dbl(list(idx_vec=vvec,minz=minz,maxz=maxz),match_interpolated_velocities,interp_dat=v_interp))
+  #mutate(temperature_mean=purrr::pmap_dbl(list(rhoidx_vec=rhovec,minz=minz,maxz=maxz),match_interpolated_data,interp_dat=temperature_interp))
+glimpse(faces_uv_interp)
+```
+
+
 ```{r}
 # as of March 2021 we are not pulling w out of ROMS, instead we're using it to close fluxes
 # w <- pull_var('w')
@@ -906,12 +1047,57 @@ Results are different from the original version from Owen, so this will need mor
 This left and right issue will be the tricky part. After this, it should be only a case of multiplying this flux by area of the face/depth layer to get the net exchange across the face in m3/s, which is what HydroConstruct needs
 
 ```{r}
-
 fluxes <- test_uv_albi %>% 
   mutate(gross = orthogonal_flux * face_area) %>%
   select(.fx0, atlantis_layer, gross)
-
 ```
+
+## Flux calculation with interpolation method
+
+We need to get the angles for each face, and the angle of the average flux relative to the face. We can also join the u and v interpolated datasets, so that we can get the net flux across each face from those two components.
+
+```{r}
+# from the faces_sf spatial object, let's retrieve geometry information of the points that define each face, and calculate the angle. Also calclate its sine and cosine to see how they compare with the BGM values
+
+get_angle <- function(geomstring) {
+  coords <- st_coordinates(geomstring)
+  this_atan <- atan2(coords[2,2]-coords[1,2], coords[2,1]-coords[1,1]) # as per R help, atan2(y,x)
+  return(this_atan)
+}
+
+faces_sf_albi <- faces_sf %>% rowwise() %>% mutate(face_angle = get_angle(geometry),
+                                                   sine_albi = sin(face_angle),
+                                                   cosine_albi = cos(face_angle)) %>%
+  select(.fx0, face_angle) %>% st_set_geometry(NULL) # only keep face id and angle
+
+# now use the same code as above, except the line that works out the angles from sine and cosine
+
+uv_interp <- faces_uv_interp %>% select(.fx0,atlantis_layer,face_area,u_mean,v_mean) %>%
+  left_join(faces_sf_albi,by=c('.fx0')) %>%
+  mutate(uv_angle=atan2(v_mean, u_mean),uv_mag=sqrt(u_mean^2+v_mean^2)) %>%
+  mutate(diff_angle = uv_angle - face_angle, # beta - alpha
+         angle_new = ifelse((diff_angle>=0 & diff_angle<=pi) | (diff_angle<0 & diff_angle>=-pi), diff_angle, # add or subtract 2*pi as needed (9)see above)
+                            ifelse(diff_angle < -pi, diff_angle+2*pi, diff_angle-2*pi)),
+         orthogonal_flux = uv_mag * sin(angle_new)) # get the component of the flux that is perpendicular to the face. Because of the angle transformation (+/- 2*pi), multiplying by the sine of the angle between uv and the face returns the correct sign for the flux: negative for LR, positive for RL.
+```
+
+```{r}
+fluxes_interp <- uv_interp %>% 
+  mutate(gross = orthogonal_flux * face_area) %>%
+  select(.fx0, atlantis_layer, gross)
+```
+
+## Compare interpolated fluxes with interval matching
+
+```{r}
+fluxes_interp %>% full_join(fluxes, by = c('.fx0','atlantis_layer')) %>%
+  rename(flux_interpolation = gross.x, flux_interval = gross.y) %>%
+  ggplot(aes(x = flux_interpolation, y = flux_interval, color = atlantis_layer))+
+  geom_point()+
+  geom_abline(slope = 1, intercept = 0)+
+  theme_minimal()
+```
+Some differences, but overall qualitatively comparable. A number of small fluxes, however, have opposite sign with the two methods, likely due to the different way of calclating mean velocities from u and v points in the vertical. 
 
 ## Close Flux Calculations
 
