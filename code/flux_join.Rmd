@@ -622,6 +622,19 @@ interp_foo <- function(romsdepths,romsvar) {
 }
 ```
 
+
+Remember that w is not at the same depth as h - see [here](https://www.myroms.org/wiki/images/4/41/vertical_grid.png). That means that there are 43 w for 42 h, and so on. Let's write a function that interpolates w to the mid-point of the cell, which is where h is located for $\rho$ points.
+
+**TODO**: Come back to this and try and pull w with Mike Sumner's angstroms::romshcoords() but using Cs_w and s_w instead - not sure if it will work.
+
+```{r}
+ma <- function(x, n = 2){
+  moving_average <- as.numeric(stats::filter(x, rep(1 / n, n), sides = 2))
+  moving_average <- moving_average[!is.na(moving_average)]
+  return(moving_average)
+}
+```
+
 Now, we write a function that:
 
 * Pulls a variable from ROMS
@@ -640,19 +653,27 @@ interpolate_var <- function(variable){
     nest(data=c(!!variable))%>% 
     mutate(evar=purrr::map(data,~.[[1]])) %>% 
     left_join(romsdepthsdf,by=c('xi_rho','eta_rho')) %>% 
-    left_join(roms_rho,by=c('xi_rho','eta_rho')) %>% 
+    left_join(roms_rho,by=c('xi_rho','eta_rho')) 
+  if(variable=='w'){
+    interp_dat <- interp_dat %>% mutate(evar=purrr::map(evar,ma)) %>% # interpolate between w points, to have the same layers as h
+      drop_na() # for some reason, some rho points do not have w values (scroll down dat to see some examples). In other ROMS this may happen to other variables too, so keep an eye on this one when porting it to other systems
+    }
+  interp_dat <- interp_dat %>% 
     mutate(interp = purrr::map2(romsdepth,evar,interp_foo)) %>% 
     dplyr::select(-data,-evar,-romsdepth)
   return(interp_dat)
 }
 ```
 
+We can operationalize this so that peple get to pick which variables they want to extract
 ```{r}
 # test
 salt_interp <- interpolate_var('salt')
 temperature_interp <- interpolate_var('temp') 
+w_interp <- interpolate_var('w') 
 glimpse(salt_interp)
 glimpse(temperature_interp)
+glimpse(w_interp)
 # test plot
 salt_interp %>% 
   pluck("interp",1) %>% 
@@ -664,7 +685,11 @@ temperature_interp %>%
   ggplot(aes(val,depth))+
   geom_point(size=0.5)+
   labs(x="temperature",y="depth (m)")
-
+w_interp %>% 
+  pluck("interp",1) %>% 
+  ggplot(aes(val,depth))+
+  geom_point(size=0.5)+
+  labs(x="w",y="vertical velocity (m/s)")
 # y1 <- test$salt[[1]]
 # x1 <- test$romsdepth[[1]]
 # int1 <- interp_foo(x1,y1)
@@ -682,7 +707,7 @@ We use the `atlantis_depths` tibble that we build above to
 # This is a matching key for all atlantis boxes and layers to the ROMS rho points that fall within them
 boxes_rho_thin <- boxes_rho_join %>% 
   st_set_geometry(NULL) %>% 
-  dplyr::select(.bx0,xi_rho,eta_rho,rhoidx) %>% 
+  dplyr::select(.bx0,xi_rho,eta_rho,rhoidx,area) %>% 
   drop_na()
 boxes_rho_join_with_depth <- atlantis_depths %>% 
   left_join(boxes_rho_thin,by=c(".bx0")) %>% 
@@ -770,6 +795,42 @@ boxes_roms_salt_temp %>%
   geom_abline(intercept=0,slope=1)+
   theme_minimal()
 ```
+
+## Match w with Atlantis layers
+
+To calculate exchanges of water between the depth layers of an Atlantis prism, we use values of w pulled from the ROMS data. This requires caution, because vertical velocity w has been used in some ROMS to balance horizontal fluxes. However, we ned to at least compare this method to calulating w as the residual of u and v (see below). 
+
+Here, we simply match for each $\rho$ point the interpolated values of w that are the closest to the interface between two depth layers. Once we have isolated all those, we can calculate an average per box. 
+
+Write function that only keeps the depth-value pairs at the interface between layers (e.g. 50,100,etc.). Then join with box-rhoidx information, and summarize by box and by depth layer.
+```{r}
+w_at_interface <- boxes_rho_join_with_depth %>% left_join(w_interp, by = c('xi_rho','eta_rho','rhoidx'))
+
+pull_w_at_depth <- function(maxz,interp){
+  w_at_depth <- interp %>% filter(depth==round(maxz)) %>% select(val) %>% pull()
+  return(w_at_depth)
+}
+
+w_at_interface <- w_at_interface %>% 
+  drop_na() %>% # get rid of NAs
+  filter(!maxz==0) %>% # drop all rows where maxz = 0, because these are "empty" layers and we do not need w at the surface
+  group_by(rhoidx) %>%
+  mutate(w_at_depth = purrr::map2(maxz,interp,pull_w_at_depth)) %>%
+  select(-interp) %>%
+  unnest(cols = c(w_at_depth)) %>%
+  ungroup()
+```
+
+Calculate mean water velocity across the bottom layer of a box, then add box information (e.g. area) to calculate the net water flux in m3/s. 
+```{r}
+mean_w_at_interface <- w_at_interface %>% 
+  group_by(.bx0,atlantis_layer,minz,maxz,area) %>%
+  summarise(mean_w = mean(w_at_depth,na.rm=TRUE)) %>%
+  ungroup() %>%
+  mutate(net_w=mean_w*area)
+```
+
+**IMPORTANT**: I am not able to see, in this ROMS input file, whether a negative w corresponds to an upward or downward velocity. This is crucial to this step and it may change between ROMS, so we need to find a way to automatically recognize it or check for it (HydroConstruct considers positive fluxes as going *up*, and negative fluxes as going *down*).
 
 # Calculate Fluxes
 
@@ -1206,6 +1267,19 @@ As it stands, we have the issue of closing the budget of the bottom layer for ea
 2. Use box 0 to "balance" these fluxes. See discussion [here](https://confluence.csiro.au/display/Atlantis/Hydro+FAQ). Also see the User Guide: *"Box 0 is special because it is set up to have water and nutrient fluxes to nearly all other model boxes. This is set to simulate supply of advective tracers to the oceanic boxes and accommodate any missing water fluxes due to conversion of oceanographic files into Atlantis input files (see chapter 4). While the model is running it also acts as a store for information on any migrating groups currently outside the model domain."*
 
 Box 0 is outside the ROMS domain for CalCurrent for now, so let's put this off.
+
+## Comparing ROMS w with w as residual of u and v
+
+```{r}
+compare_w <- box_fluxes %>% left_join(mean_w_at_interface,by=c('box'='.bx0','atlantis_layer'))
+
+compare_w %>% #filter(atlantis_layer==1) %>%
+  ggplot()+
+  geom_point(aes(x=w,y=net_w,color=atlantis_layer))+
+  theme_minimal()+
+  labs(xlab='Residual w',y='ROMS w')
+```
+There are substantial differences in w between calculating it from ROMS and as the residual of horizontal fluxes.
 
 ## Correction for hyperdiffusion
 
