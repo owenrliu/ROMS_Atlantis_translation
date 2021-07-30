@@ -10,8 +10,7 @@ library(rnaturalearth)
 # Boundary geometry file from Atlantis
 atlantis_bgm <- read_bgm(here('data','atlantis','CalCurrentV3_utm.bgm'))
 #Atlantis geometry as an sf shapefile
-atlantis_sf <- atlantis_bgm %>% box_sf()
-
+# atlantis_sf <- atlantis_bgm %>% box_sf()
 
 # cell lat/lons from ROMS
 romsfile <- here::here('data','roms','wc12_ccsra31_his_month_avg_1981_2010_Jan.nc')
@@ -40,12 +39,13 @@ wc <- ne_countries(continent="North America",returnclass = 'sf') %>%
 # plot
 bbox=st_bbox(atlantis_sf)
 p <- ggplot()+
-  geom_sf(data=atlantis_sf,fill='blue',alpha=0.6)+
   geom_sf(data=roms_rho,fill='light blue',col=NA)+
+  geom_sf(data=atlantis_sf,fill='blue',alpha=0.6)+
   geom_sf(data=wc,fill='gray70')+
-  xlim(bbox[1],bbox[2])+ylim(bbox[2],bbox[4])+
+  xlim(bbox[1],bbox[2]+7e5)+ylim(bbox[2],bbox[4])+
   annotate('text',x=0,y=2e6,angle=320,label="atlantis")+
   annotate('text',x=-4e5,y=1.5e6,angle=320,label="ROMS")+
+  labs(x='',y='')+
   theme_minimal()
 p
 
