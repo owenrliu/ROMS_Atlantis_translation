@@ -622,17 +622,23 @@ interp_foo <- function(romsdepths,romsvar) {
 }
 ```
 
-
 Remember that w is not at the same depth as h - see [here](https://www.myroms.org/wiki/images/4/41/vertical_grid.png). That means that there are 43 w for 42 h, and so on. Let's write a function that interpolates w to the mid-point of the cell, which is where h is located for $\rho$ points.
 
-**TODO**: Come back to this and try and pull w with Mike Sumner's angstroms::romshcoords() but using Cs_w and s_w instead - not sure if it will work.
-
+Get 43 values of depth, to go with the 43 values of the variable. Using angstroms, map h to Cs_w, the vertical stretching coordinate for w.
 ```{r}
-ma <- function(x, n = 2){
-  moving_average <- as.numeric(stats::filter(x, rep(1 / n, n), sides = 2))
-  moving_average <- moving_average[!is.na(moving_average)]
-  return(moving_average)
-}
+romsdepths_w <- romshcoords(romsfile, S = "Cs_w", depth = "h")
+romsdepths_w <- subset(romsdepths_w, dim(romsdepths_w)[3]:1) # angstroms returns depths from shallowest to deepest, while below we extract ROMS variables from deepest to shallowest. flipping here or else it maps ROMS variables upside-down
+
+# using tabularaster to convert to tibble
+# and a indexing template with "by_column" filling
+romsi <- crossing(xi_rho=1:dim(romsdepths)[2],eta_rho=1:dim(romsdepths)[1]) %>% arrange(-eta_rho) %>% mutate(cellindex=row_number()) # making sure that the join by cellindex below is correct - doing this for consistency with the way tabularaster::as_tibble() unpacks the raster cells 
+romsdepthsdf_w <- tabularaster::as_tibble(romsdepths_w,dim=F) %>% 
+  arrange(cellindex) %>% 
+  left_join(romsi,by='cellindex') %>% 
+  set_names(c("romsdepth","cellindex","xi_rho","eta_rho")) %>% 
+  group_by(cellindex,xi_rho,eta_rho) %>% 
+  nest(romsdepth=c(romsdepth)) %>% ungroup() %>% 
+  mutate(romsdepth=purrr::map(romsdepth,function(x)x[['romsdepth']]))
 ```
 
 Now, we write a function that:
@@ -651,13 +657,20 @@ interpolate_var <- function(variable){
   interp_dat <- dat %>% 
     dplyr::select(xi_rho,eta_rho,!!variable) %>% 
     nest(data=c(!!variable))%>% 
-    mutate(evar=purrr::map(data,~.[[1]])) %>% 
+    mutate(evar=purrr::map(data,~.[[1]]))
+  # do this step conditional to join with the appropriate depth data frame depending on the variable
+  if(variable=="w"){
+    interp_dat <- interp_dat %>%
+      left_join(romsdepthsdf_w,by=c('xi_rho','eta_rho')) %>% 
+      left_join(roms_rho,by=c('xi_rho','eta_rho'))
+    # drop NAs - there are a lot in w - might want to check why
+    idx <- unlist(lapply(interp_dat$evar, function(x)length(which(is.na(x)))/length(x)))
+    interp_dat <- interp_dat[-which(idx==1),]
+  } else {
+   interp_dat <- interp_dat %>%
     left_join(romsdepthsdf,by=c('xi_rho','eta_rho')) %>% 
     left_join(roms_rho,by=c('xi_rho','eta_rho')) 
-  if(variable=='w'){
-    interp_dat <- interp_dat %>% mutate(evar=purrr::map(evar,ma)) %>% # interpolate between w points, to have the same layers as h
-      drop_na() # for some reason, some rho points do not have w values (scroll down dat to see some examples). In other ROMS this may happen to other variables too, so keep an eye on this one when porting it to other systems
-    }
+  }
   interp_dat <- interp_dat %>% 
     mutate(interp = purrr::map2(romsdepth,evar,interp_foo)) %>% 
     dplyr::select(-data,-evar,-romsdepth)
@@ -831,6 +844,17 @@ mean_w_at_interface <- w_at_interface %>%
 ```
 
 **IMPORTANT**: I am not able to see, in this ROMS input file, whether a negative w corresponds to an upward or downward velocity. This is crucial to this step and it may change between ROMS, so we need to find a way to automatically recognize it or check for it (HydroConstruct considers positive fluxes as going *up*, and negative fluxes as going *down*).
+
+Plot to have a look.
+```{r}
+atlantis_sf %>% left_join(mean_w_at_interface,by='.bx0') %>%
+  slice_min(atlantis_layer) %>%
+  ggplot()+
+  geom_sf(aes(fill=net_w))+
+  scale_fill_viridis()+
+  theme_minimal()
+```
+
 
 # Calculate Fluxes
 
