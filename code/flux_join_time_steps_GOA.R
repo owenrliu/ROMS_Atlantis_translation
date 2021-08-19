@@ -15,10 +15,11 @@ library(tabularaster)
 
 select <- dplyr::select
 here <- here::here
+map <- purrr::map
 options(dplyr.summarise.inform=FALSE)
 
 # read ROMS data
-romsfile <- here::here('data','roms','nep5_avg_0804.nc')
+romsfile <- here::here('data','roms','nep5_avg_0808.nc')
 roms <- tidync(romsfile)
 # read GOA ROMS grid
 romsfile2 <- here::here('data','roms','NEP_grid_5a.nc')
@@ -203,8 +204,7 @@ set_indextent <- function(x) {
   setExtent(x, extent(0, ncol(x), 0, nrow(x)))
 }
 
-#TODO: doubl-check that NEP and CGOA ROMS use Vtransform = 2
-romshcoords_goa <- function(x, y, grid_type = "rho", slice, ..., S = "Cs_r", depth = "h", simple = FALSE, Vtransform = 2){
+romshcoords_goa <- function(x, y, grid_type = "rho", slice, ..., S = "Cs_r", depth = "h", simple = FALSE){
   h <- romsdata(x, varname = depth)
   Cs_r <- ncget(y, S)
   v <- values(h)
@@ -215,10 +215,10 @@ romshcoords_goa <- function(x, y, grid_type = "rho", slice, ..., S = "Cs_r", dep
   } else {
     grid_type <- match.arg(tolower(grid_type),c("rho","psi","u","v","w"))
     
-    # Vtransform <- as.integer(ncget(x,"Vtransform"))
+    Vtransform <- as.integer(ncget(y,"Vtransform"))
     if (!Vtransform %in% c(1,2)) stop("Vtransform must be 1 or 2")
     
-    hc <- min(values(romsdata(x, varname = depth)))
+    hc <- ncget(y,"hc")
     
     depth_grid <- if (grid_type=="w") "w" else "rho"
     
@@ -388,7 +388,7 @@ boxes_depths_rhopts <- boxes_rho_join_with_depth %>%
   select(-dz) %>% 
   group_by(.bx0,atlantis_layer,minz,maxz) %>% 
   nest(rhopts=c(xi_rho,eta_rho,rhoidx)) %>% 
-  mutate(rhovec=map(rhopts,~pluck(.,'rhoidx')))
+  mutate(rhovec=purrr::map(rhopts,~pluck(.,'rhoidx')))
 
 # ... and for Atlantis faces
 faces_u_thin <- faces_u_join %>%
@@ -511,7 +511,7 @@ interpolate_var <- function(variable, time_step){
 # Also the functions that we call in here will need to go elsewhere and only be called once
 
 interpolate_ts <- function(time_step) {
-  
+
   # apply interpolate_var
   # TODO: operationalize this so that it works with whatever state variables people need to pull
   salt_interp <- interpolate_var('salt', time_step)
@@ -618,9 +618,9 @@ interpolate_ts <- function(time_step) {
 
   # think about the below when we get to do this for more than one time step
   if(time_step == roms_time[1]) {
-    write.table(variables_out, '../outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
+    write.table(variables_out, 'outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
   } else {
-    write.table(variables_out, '../outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
+    write.table(variables_out, 'outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
   }
          
   fluxes_out_left <- fluxes_interp %>% drop_na() %>%
@@ -643,9 +643,9 @@ interpolate_ts <- function(time_step) {
 
   # think about the below when we get to do this for more than one time step
   if(time_step == roms_time[1]) {
-    write.table(fluxes_out, '../outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
+    write.table(fluxes_out, 'outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
   } else {
-    write.table(fluxes_out, '../outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
+    write.table(fluxes_out, 'outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
   }
 }
 

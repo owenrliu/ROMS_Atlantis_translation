@@ -46,7 +46,7 @@ From Mike Jacox 12/28/20 -
 *The larger one is a sample of what the ROMS output looks like, with all variables (only physics in this example, no biogeochemistry). The other file has the depths that go with the 3D variables. At this stage I think you'll be most interested in temp, salinity, and currents. Variable names (and associated dimensions) for those are: temp (rho) salt (rho) u (u) v (v) w (w)*
 
 ```{r}
-romsfile <- here::here('data','roms','goa_nep10_1ts.nc')
+romsfile <- here::here('data','roms','test.nc')
 roms <- tidync(romsfile)
 romsfile2 <- here::here('data','roms','NEP_grid_5a.nc')
 roms2 <- tidync(romsfile2)
@@ -320,7 +320,7 @@ set_indextent <- function(x) {
   setExtent(x, extent(0, ncol(x), 0, nrow(x)))
 }
 
-romshcoords_goa <- function(x, y, grid_type = "rho", slice, ..., S = "Cs_r", depth = "h", simple = FALSE, Vtransform = 2){
+romshcoords_goa <- function(x, y, grid_type = "rho", slice, ..., S = "Cs_r", depth = "h", simple = FALSE){
   h <- romsdata(x, varname = depth)
   Cs_r <- ncget(y, S)
   v <- values(h)
@@ -331,10 +331,10 @@ romshcoords_goa <- function(x, y, grid_type = "rho", slice, ..., S = "Cs_r", dep
   } else {
     grid_type <- match.arg(tolower(grid_type),c("rho","psi","u","v","w"))
     
-    # Vtransform <- as.integer(ncget(x,"Vtransform"))
+    Vtransform <- as.integer(ncget(y,"Vtransform"))
     if (!Vtransform %in% c(1,2)) stop("Vtransform must be 1 or 2")
     
-    hc <- min(values(romsdata(x, varname = depth)))
+    hc <- ncget(y,"hc")
     
     depth_grid <- if (grid_type=="w") "w" else "rho"
     
