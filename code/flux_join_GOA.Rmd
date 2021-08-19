@@ -43,7 +43,7 @@ From Mike Jacox 12/28/20 -
 *The larger one is a sample of what the ROMS output looks like, with all variables (only physics in this example, no biogeochemistry). The other file has the depths that go with the 3D variables. At this stage I think you'll be most interested in temp, salinity, and currents. Variable names (and associated dimensions) for those are: temp (rho) salt (rho) u (u) v (v) w (w)*
 
 ```{r}
-romsfile <- here::here('data','roms','goa_nep10_1ts.nc')
+romsfile <- here::here('data','roms','test.nc')
 roms <- tidync(romsfile)
 romsfile2 <- here::here('data','roms','NEP_grid_5a.nc')
 roms2 <- tidync(romsfile2)
@@ -401,9 +401,7 @@ Depth at $\rho$ points is stored in the $h$ variable, and we can use that to cal
 
 **NOTES FOR GOA ROMS**: 
 1. GOA ROMS have h in the grid file and vertical stretching coordinates in the ROMS output - possibly because these change at each time step? Which means, that angstroms::romshcoords() will not work, because that function assumes that h and Cs_r are in the same input file. Attempting to write a version that would work (note that also requires importing a couple more functions from angstrom's environment).
-2. GOA ROMS do not have an indication of Vtransform in the grid file nor in the output files. See discussion [here](https://www.myroms.org/wiki/Vertical_S-coordinate). So this will need to be specified in the argument of the function instead.
-3. This function pulls $h_c$ from the ROMS file - but the GOA files do not have this variable. [This discussion](https://www.myroms.org/wiki/Vertical_S-coordinate) explains that $h_c = min(T_{cline},h_{min})$. I looked into the West Coast ROMS file we have, and both $T_{cline}=10$ and $h_C=10$. For the GOA file, $h_{min}=10$. So for now I am coding $h_c=min(h)$ within the custom function below.
-4. For some reason I am not too sure about, running the romhcoords() code here returns depths from deepest to shallowest, without flipping. Therefore, the step of flipping this in the chunk below becomes redundant. There are a couple of flips in romshcoords(), test it on the WC data to see if the behaviour is the same.
+2. For some reason I am not too sure about, running the romhcoords() code here returns depths from deepest to shallowest, without flipping. Therefore, the step of flipping this in the chunk below becomes redundant. There are a couple of flips in romshcoords(), test it on the WC data to see if the behaviour is the same.
 
 ```{r}
 ncget <- function(x, varname) {
@@ -416,7 +414,7 @@ set_indextent <- function(x) {
   setExtent(x, extent(0, ncol(x), 0, nrow(x)))
 }
 
-romshcoords_goa <- function(x, y, grid_type = "rho", slice, ..., S = "Cs_r", depth = "h", simple = FALSE, Vtransform = 2){
+romshcoords_goa <- function(x, y, grid_type = "rho", slice, ..., S = "Cs_r", depth = "h", simple = FALSE){
   h <- romsdata(x, varname = depth)
   Cs_r <- ncget(y, S)
   v <- values(h)
@@ -427,10 +425,10 @@ romshcoords_goa <- function(x, y, grid_type = "rho", slice, ..., S = "Cs_r", dep
   } else {
     grid_type <- match.arg(tolower(grid_type),c("rho","psi","u","v","w"))
     
-    # Vtransform <- as.integer(ncget(x,"Vtransform"))
+    Vtransform <- as.integer(ncget(y,"Vtransform"))
     if (!Vtransform %in% c(1,2)) stop("Vtransform must be 1 or 2")
     
-    hc <- min(values(romsdata(x, varname = depth)))
+    hc <- ncget(y,"hc")
     
     depth_grid <- if (grid_type=="w") "w" else "rho"
     
