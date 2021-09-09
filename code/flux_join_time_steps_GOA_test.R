@@ -647,23 +647,55 @@ roms_to_atlantis <- function(this_file){
       write.table(variables_out, 'outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
     }
     
-    fluxes_out_left <- fluxes_interp %>% drop_na() %>%
+    # write out fluxes
+    # We need to relabel the faces. Format 9 in HC takes faces numbered as 0,1,2,...,n for each box, instead of with their unique identifier .fx0. Start from faces_sf.
+    # Workflow:
+    # * Join flux data set with face data set for box to the left, by face. 
+    # * Join flux data set with face data set for box to the right, by face. **Flip the sign to the flux**, because negative fluxes are LR, but here the box refers to the box to the right, and the LR flux is actually entering the box, thus requiring to be positive.
+    # * Do a rbind()
+    # * Pad empty depth layers with 0's
+    # This way fluxes will be duplicated, which I believe is what we need.
+    fluxes_out_left <- fluxes_interp %>%
       left_join(faces %>% select(.fx0,left), by='.fx0') %>%
-      mutate(time_step=time_step) %>%
-      select(left,.fx0,time_step,atlantis_layer,gross) %>%
-      set_names(c("Polygon_number","Face_number","Time_step","Depth_Layer","Flux [m3/s]"))
+      mutate(time_step=1) %>%
+      select(left,.fx0,atlantis_layer,gross) %>%
+      set_names(c('Polygon_number','Face_number','Depth_layer','Flux_m3s'))
     
-    fluxes_out_rigth <- fluxes_interp %>% drop_na() %>%
+    fluxes_out_rigth <- fluxes_interp %>%
       left_join(faces %>% select(.fx0,right), by='.fx0') %>%
-      mutate(gross = -gross, time_step=time_step) %>%
-      select(right,.fx0,time_step,atlantis_layer,gross) %>%
-      set_names(c("Polygon_number","Face_number","Time_step","Depth_Layer","Flux [m3/s]"))
+      mutate(gross = -gross) %>%
+      select(right,.fx0,atlantis_layer,gross) %>%
+      set_names(c('Polygon_number','Face_number','Depth_layer','Flux_m3s'))
     
-    fluxes_out <- rbind(fluxes_out_left,fluxes_out_rigth) %>%
+    fluxes_out <- rbind(fluxes_out_left,fluxes_out_rigth) %>% 
+      distinct() %>% 
+      arrange(Polygon_number,Face_number,Depth_layer) 
+    
+    # make an index for the new faces
+    face_idx <- fluxes_out %>%
+      select(Polygon_number,Face_number) %>% 
       distinct() %>%
-      arrange(Polygon_number,Face_number,Time_step,Depth_Layer)
+      group_by(Polygon_number) %>%
+      mutate(Face_new=row_number()) %>%
+      ungroup()
     
-    names(fluxes_out) <- gsub('_',' ',names(fluxes_out))
+    # join the index to the fluxes_out data set
+    fluxes_out <- fluxes_out %>% left_join(face_idx,by=c('Polygon_number','Face_number'))
+    
+    # pad missing depth layers
+    fluxes_out <- fluxes_out %>% complete(Depth_layer, nesting(Polygon_number,Face_new)) %>% 
+      select(Polygon_number,Face_new,Depth_layer,Flux_m3s) %>%
+      arrange(Polygon_number,Face_new,Depth_layer)
+    
+    # add time step column (placeholder value here)
+    fluxes_out <- fluxes_out %>% mutate(Time_step=1)
+    
+    # change NAs to 0s
+    fluxes_out[is.na(fluxes_out)] <- 0
+    
+    # set columns in the right order, sort, and rename them as HC needs
+    fluxes_out <- fluxes_out %>% select(Polygon_number,Face_new,Time_step,Depth_layer,Flux_m3s) %>%
+      set_names('Polygon number','Face number','Time Step (12)hr','Depth Layer','Flux [m3/s]')
     
     # think about the below when we get to do this for more than one time step
     if(this_file==roms_files_list[1]){
