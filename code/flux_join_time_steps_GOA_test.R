@@ -634,6 +634,7 @@ roms_to_atlantis <- function(this_file){
       mutate(time_step = time_step, maxz = -maxz) %>% # how to turn this into iteration over time stesp? Either ts from NetCDF, or just iteration # of the function
       ungroup() %>%
       select(time_step,.bx0,maxz,net_w,temperature_mean,salt_mean) %>%
+      mutate_all(formatC,format='e',digits=8) %>%
       set_names(c('Time Step','Polygon number','Depth Layer [m]','Vertical velocity [m3/s]','Average Temperature [Celsius]','Average Salinity [PartPer1000]'))
     
     # think about the below when we get to do this for more than one time step
@@ -694,7 +695,9 @@ roms_to_atlantis <- function(this_file){
     fluxes_out[is.na(fluxes_out)] <- 0
     
     # set columns in the right order, sort, and rename them as HC needs
-    fluxes_out <- fluxes_out %>% select(Polygon_number,Face_new,Time_step,Depth_layer,Flux_m3s) %>%
+    fluxes_out <- fluxes_out %>% 
+      select(Polygon_number,Face_new,Time_step,Depth_layer,Flux_m3s) %>%
+      mutate_all(formatC,format='e',digits=8) %>%
       set_names('Polygon number','Face number','Time Step (12)hr','Depth Layer','Flux [m3/s]')
     
     # think about the below when we get to do this for more than one time step

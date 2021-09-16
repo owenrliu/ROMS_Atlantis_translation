@@ -243,7 +243,7 @@ faces_v_join <- faces_buffer %>% st_join(vxy)
 Example map of what this means spatially
 
 ```{r}
-set.seed(413)
+set.seed(192)
 tfaceidx <- sample(faces_v_join$.fx0,1)
 tvidx <- faces_v_join %>% filter(.fx0==tfaceidx) %>% pluck('vidx')
 tbuff <- faces_v_join %>% 
@@ -258,9 +258,10 @@ ggplot()+
   # geom_sf(data=atlantis_sf,fill="blue")+
   geom_sf(data=tbuff,fill=NA)+
   geom_sf(data=tface,col='black',size=1.5)+
-  geom_sf(data=tv,col='red')+
+  geom_sf(data=tv,col='red', size = 2.5)+
   coord_sf(xlim=c(tbbox[1],tbbox[3]),ylim=c(tbbox[2],tbbox[4]))+
-  labs(title=paste("v Points for\nFace Between Box",unique(tbuff$left),"and Box",unique(tbuff$right)))
+  theme_minimal()+
+  labs(title=paste("v Points for\nFace Between Box",unique(tbuff$left),"and Box",unique(tbuff$right)),x="Lon",y="Lat")
 rm(tbuff,tbbox,tface,tvidx,tfaceidx)
 ```
 
@@ -275,6 +276,20 @@ boxes_u_join <- atlantis_sf %>% st_join(uxy) %>% select(.bx0,uidx) %>% st_set_ge
 # join v points
 boxes_v_join <- atlantis_sf %>% st_join(vxy) %>% select(.bx0,vidx) %>% st_set_geometry(NULL)
 ```
+
+View.
+```{r}
+set.seed(42)
+
+this_box <- sample(boxes_rho_join$box_id,1)
+boxes_rho_join %>% filter(box_id==this_box) %>%
+  ggplot()+
+  geom_sf(fill=NA, size=1)+
+  geom_point(aes(x=x,y=y),color="red")+
+  theme_minimal()+
+  labs(x="Lon",y="Lat",title = paste("ROMS rho points overlapping with Box",this_box,sep=" "))
+```
+
 
 ## Empty Boxes
 
@@ -372,9 +387,9 @@ face_depths <- faces %>%
          face_area=ifelse((left_area>0 & right_area >0), min(left_area, right_area), NA)) # I think this should be the area of the smaller face instead of the average of the two? Imagine a box to have 6 layers, and its neighboring box only 2 (e.g. along a steep depth gradient). The 4 layers starting from the bottom of the deep box (layers 3-6) do not communicate with the adjacent shallow box because layers 3-6 do not exists in the shallow box. In other words, mean(area_of_face_at_layer_6_in_deep_box, 0) = area_of_face_6_in_deep_box/2, which makes no sense for the shallow box since layer 6 does not exist there. Also if there is no contact bertween two faces at a certain depth (i.e. one of the areas is 0), area in common is NA. Else, there will be vertical fluxes for depth layers that do not exist.
 
 # | box1  ||  box2  | # layer 1: same face surface for box1 and box2 (surface = min(surface1, surface2))
-# '-------'|        | # layer 2: face surface of box2 is larger (i.e. deeper), but both boxes have face surface at this depth (surface = min(surface1, surface2))
+# '-------'|        | # layer 2: face surface of box2 is larger (i.e. deeper), but both boxes have 
+#          |        | #          face surface at this depth (surface = min(surface1, surface2))
 #          |        | # layers 3-6: only box2 has these layers, so there is no face surface in common between the two boxes (surface = NA)
-#          |        |
 #          |        |
 #          |________|
 
@@ -843,7 +858,7 @@ interpolate_var <- function(variable){
 ```
 
 We can operationalize this so that peple get to pick which variables they want to extract
-```{r}
+```{r, fig.width=2.5,fig.height=6}
 # test
 salt_interp <- interpolate_var('salt')
 temperature_interp <- interpolate_var('temp') 
@@ -856,17 +871,20 @@ salt_interp %>%
   pluck("interp",1) %>% 
   ggplot(aes(val,depth))+
   geom_point(size=0.5)+
-  labs(x="salinity",y="depth (m)")
+  theme_bw()+
+  labs(x="Salinity (ppm)",y="Depth (m)")
 temperature_interp %>% 
   pluck("interp",1) %>% 
   ggplot(aes(val,depth))+
   geom_point(size=0.5)+
-  labs(x="temperature",y="depth (m)")
+  theme_bw()+
+  labs(x="Temperature (C)",y="Depth (m)")
 w_interp %>% 
   pluck("interp",1) %>% 
   ggplot(aes(val,depth))+
   geom_point(size=0.5)+
-  labs(x="w",y="vertical velocity (m/s)")
+  theme_bw()+
+  labs(x="Vertical velocity (m/s)",y="Depth (m)")
 # y1 <- test$salt[[1]]
 # x1 <- test$romsdepth[[1]]
 # int1 <- interp_foo(x1,y1)
@@ -1018,7 +1036,7 @@ atlantis_sf %>% left_join(mean_w_at_interface,by='.bx0') %>%
   scale_fill_viridis()+
   theme_minimal()
 ```
-MOst vertical fluxes seem to be upward. This is suspicious for a downwelling system like the GOA - check the calculations.
+In CGOA and NEP ROMS (and in most ROMS), negative $w$ means an upward flow.
 
 # Calculate Fluxes
 
@@ -1518,8 +1536,6 @@ HydroConstruct takes inputs in a number of formats (see notes [here](https://doc
 
 **IMPORTANT**: we need to be careful with the units of $w$. HydroConstruct takes $w$ as a state variable. However, different input files seem to have different units, with some giving HydroConstruct a velocy (m/s), some a volume (m$^3$/s), and others some variation of these. In addition, the NetCDF format specifies whether a positive $w$ is upwards or downwards, but DAT files do not.
 
-TODO: Albi to look into what HydroConstruct does to $w$ and what unit is therefore needed.
-
 ## State variables
 
 Use `boxes_salt_temperature_interp` and `mean_w_at_interface` objects. Join them, order the columns, and name them as appropriate. Subsequent time steps can be appended by rbind to the first time step.
@@ -1531,12 +1547,13 @@ variables_out <- boxes_salt_temperature_interp %>%
   mutate(time_step = 1, maxz = -maxz) %>% # how to turn this into iteration over time stesp? Either ts from NetCDF, or just iteration # of the function
   ungroup() %>%
   select(time_step,.bx0,maxz,net_w,temperature_mean,salt_mean) %>%
+  mutate_all(formatC,format='e',digits=8) %>%
   set_names(c('Time Step','Polygon number','Depth Layer [m]','Vertical velocity [m3/s]','Average Temperature [Celsius]','Average Salinity [PartPer1000]'))
 
 # think about the below when we get to do this for more than one time step
 # state_vars_output <- rbind(variables_out)
 
-write.table(variables_out, '../outputs/state_vars.dat', quote=FALSE, row.names = FALSE, sep = '\t')
+write.table(variables_out, '../outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t')
 ```
 
 Check whether HydroConstruct likes this input or we need to change file encoding / separator etc.
@@ -1600,9 +1617,43 @@ fluxes_out <- fluxes_out %>% mutate(Time_step=1)
 fluxes_out[is.na(fluxes_out)] <- 0
 
 # set columns in the right order, sort, and rename them as HC needs
-fluxes_out <- fluxes_out %>% select(Polygon_number,Face_new,Time_step,Depth_layer,Flux_m3s) %>%
+fluxes_out <- fluxes_out %>% 
+  select(Polygon_number,Face_new,Time_step,Depth_layer,Flux_m3s) %>%
+  mutate_all(formatC,format='e',digits=8) %>%
   set_names('Polygon number','Face number','Time Step (12)hr','Depth Layer','Flux [m3/s]')
 
-#write.table(fluxes_out, '../outputs/transport.dat', quote=FALSE, row.names = FALSE, sep = '\t')
+write.table(fluxes_out, '../outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t')
 ```
 
+## Make lookup tables
+
+Hydroconstruct needs lookup tables with this format of input files, to correctly match the flux input file (sounds like an unneccessary hoop because just above we renumber the faces and the depth layers, but it has to be some legacy reason of who implemented this input type).
+
+### Face lookup
+
+```{r}
+face_data <- face_idx %>% 
+  left_join(faces_sf %>% select(.fx0,left,right) %>% st_set_geometry(NULL),by=c('Face_number'='.fx0')) %>%
+  rowwise() %>%
+  mutate(adjacent_box=ifelse(Polygon_number==right,left,right),
+         prop =1,
+         comments=0) %>% 
+  ungroup() %>% 
+  select(Polygon_number,Face_new,adjacent_box,prop,comments) %>%
+  set_names('Polygon #','Face #','adjacent box','prop','comments') # doing same as PS
+
+write.table(face_data,'../outputs/face_data.csv', quote=FALSE, row.names = FALSE, sep = ',')
+```
+
+### Depth lookup
+
+If one follows the format of the PS file, layers are numbered from 0 to 6, where 0 is the deepest and 6 seems to be the sediment. This highlights that we need to review the numbering throughout.
+
+```{r}
+depth_layer <- atlantis_depths %>% select(.bx0,atlantis_layer,dz) %>%
+  pivot_wider(test,id_cols=.bx0,names_from=atlantis_layer,values_from = dz) %>%
+  mutate(sed=1)%>%
+  set_names('box_id','layer0','layer1','layer2','layer3','layer4','layer5','layer6')
+
+write.table(depth_layer,'../outputs/depth_layer.csv', quote=FALSE, row.names = FALSE, sep = ',')
+```
