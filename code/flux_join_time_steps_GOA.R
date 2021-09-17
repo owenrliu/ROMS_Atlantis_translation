@@ -1,5 +1,9 @@
 # Translation of GOA ROMS to input for HydroConstruct
 
+#Albi: this file exists only because it takes one netcdf file at a time, instead of a number of netcdf files. I am trying to keep this version
+# up to date with code changes because it may become useful for debugging, but if you are doing your ROMS-to-Atlantis transformations use
+# the '_test.R' file instead of this one you are reading. Planning on cleaning things up and getting rid of this file soon, I am finding it useful during code dev and debugging
+
 start_time <- Sys.time()
 
 # Packages and settings
@@ -511,7 +515,6 @@ interpolate_var <- function(variable, time_step){
 # Also the functions that we call in here will need to go elsewhere and only be called once
 
 interpolate_ts <- function(time_step) {
-
   # apply interpolate_var
   # TODO: operationalize this so that it works with whatever state variables people need to pull
   salt_interp <- interpolate_var('salt', time_step)
@@ -619,9 +622,9 @@ interpolate_ts <- function(time_step) {
 
   # think about the below when we get to do this for more than one time step
   if(time_step == roms_time[1]) {
-    write.table(variables_out, 'outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
+    write.table(variables_out, 'outputs/state_vars_test_ts.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
   } else {
-    write.table(variables_out, 'outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
+    write.table(variables_out, 'outputs/state_vars_test_ts.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
   }
   
   # write out fluxes
@@ -634,7 +637,6 @@ interpolate_ts <- function(time_step) {
   # This way fluxes will be duplicated, which I believe is what we need.
   fluxes_out_left <- fluxes_interp %>%
     left_join(faces %>% select(.fx0,left), by='.fx0') %>%
-    mutate(time_step=1) %>%
     select(left,.fx0,atlantis_layer,gross) %>%
     set_names(c('Polygon_number','Face_number','Depth_layer','Flux_m3s'))
   
@@ -649,9 +651,10 @@ interpolate_ts <- function(time_step) {
     arrange(Polygon_number,Face_number,Depth_layer) 
   
   # make an index for the new faces
-  face_idx <- fluxes_out %>%
-    select(Polygon_number,Face_number) %>% 
-    distinct() %>%
+  face_idx <- rbind(faces %>% select(left,.fx0) %>% set_names('Polygon_number','Face_number'),
+                    faces %>% select(right,.fx0) %>% set_names('Polygon_number','Face_number')) %>%
+    distinct()%>%
+    arrange(Polygon_number,Face_number) %>%
     group_by(Polygon_number) %>%
     mutate(Face_new=row_number()) %>%
     ungroup()
@@ -660,33 +663,76 @@ interpolate_ts <- function(time_step) {
   fluxes_out <- fluxes_out %>% left_join(face_idx,by=c('Polygon_number','Face_number'))
   
   # pad missing depth layers
-  fluxes_out <- fluxes_out %>% complete(Depth_layer, nesting(Polygon_number,Face_new)) %>% 
-    select(Polygon_number,Face_new,Depth_layer,Flux_m3s) %>%
-    arrange(Polygon_number,Face_new,Depth_layer)
+  fluxes_out <- fluxes_out %>% 
+    group_by(Polygon_number,Face_number,Face_new) %>%
+    mutate(New_depth=rev(0:(length(Polygon_number)-1))) %>% # here is where we renumber the depth layers
+    ungroup() %>% 
+    complete(New_depth,nesting(Polygon_number,Face_new)) %>% 
+    select(Polygon_number,Face_new,New_depth,Flux_m3s) %>%
+    arrange(Polygon_number,Face_new,New_depth)
   
-  # add time step column (placeholder value here)
-  fluxes_out <- fluxes_out %>% mutate(Time_step=1)
+  # add time step column 
+  fluxes_out <- fluxes_out %>% mutate(Time_step = time_step)
   
   # change NAs to 0s
   fluxes_out[is.na(fluxes_out)] <- 0
   
   # set columns in the right order, sort, and rename them as HC needs
   fluxes_out <- fluxes_out %>% 
-    select(Polygon_number,Face_new,Time_step,Depth_layer,Flux_m3s) %>%
+    select(Polygon_number,Face_new,Time_step,New_depth,Flux_m3s) %>%
     mutate_all(formatC,format='e',digits=8) %>%
     set_names('Polygon number','Face number','Time Step (12)hr','Depth Layer','Flux [m3/s]')
 
   # think about the below when we get to do this for more than one time step
   if(time_step == roms_time[1]) {
-    write.table(fluxes_out, 'outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
+    write.table(fluxes_out, 'outputs/transport_test_ts.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
   } else {
-    write.table(fluxes_out, 'outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
+    write.table(fluxes_out, 'outputs/transport_test_ts.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
   }
 }
 
 # apply function to time steps
 
-# purrr::map(roms_time, possibly(interpolate_ts, NA))
+purrr::map(roms_time, possibly(interpolate_ts, NA))
 
 end_time <- Sys.time()
 end_time-start_time
+
+# write lookup tables at the end - these are required by HC as .csv files
+# face lookup
+# make an index for the new faces
+face_idx <- rbind(faces %>% select(left,.fx0) %>% set_names('Polygon_number','Face_number'),
+                  faces %>% select(right,.fx0) %>% set_names('Polygon_number','Face_number')) %>%
+  distinct()%>%
+  arrange(Polygon_number,Face_number) %>%
+  group_by(Polygon_number) %>%
+  mutate(Face_new=row_number()) %>%
+  ungroup()
+
+face_data <- face_idx %>% 
+  left_join(faces %>% select(.fx0,left,right),by=c('Face_number'='.fx0')) %>%
+  rowwise() %>%
+  mutate(adjacent_box=ifelse(Polygon_number==right,left,right),
+         prop =1,
+         comments=0) %>% 
+  ungroup() %>% 
+  select(Polygon_number,Face_new,adjacent_box,prop,comments) %>%
+  set_names('Polygon #','Face #','adjacent box','prop','comments') # doing same as PS
+
+write.table(face_data,'outputs/face_data.csv', quote=FALSE, row.names = FALSE, sep = ',')
+
+# depth lookup
+atlantis_depths_rev <- atlantis_depths %>%
+  filter(dz>0) %>%
+  group_by(.bx0) %>%
+  mutate(new_layer=rev(0:(length(.bx0)-1))) %>%
+  ungroup() %>%
+  complete(new_layer, nesting(.bx0)) %>%
+  arrange(.bx0,new_layer)
+
+depth_layer <- atlantis_depths_rev %>% select(.bx0,new_layer,dz) %>%
+  pivot_wider(id_cols=.bx0,names_from=new_layer,values_from = dz) %>%
+  mutate(sed=1) %>%
+  set_names('box_id',paste0('layer',0:(max(atlantis_depths$atlantis_layer)))) # here it would be length-1 because we renumber from 0, but we added a sediment layer so it is 'length'
+
+write.table(depth_layer,'outputs/depth_layer.csv', quote=FALSE, row.names = FALSE, sep = ',',na='_')

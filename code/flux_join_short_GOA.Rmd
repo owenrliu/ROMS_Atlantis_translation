@@ -917,6 +917,8 @@ Workflow:
 This way fluxes will be duplicated, which I believe is what we need.
 
 HC will then use a lookup .csv file to re-map the face IDs to the source and sink boxes.
+
+Albi 9/16/2021: to follow the data structure from PS, which uses the same input for HC, depth layers in the exchange file are numbered as outlined at page 68 of the User Guide: 0 as the layer at the interface between sediment and water, and then going up towards the surface. There seem to be a sediment layer of thickness 1 m in the lookup table, too, but that does not appear in the PS exchange file, it would seem. So far we have used numbering from the surface down, because it made the matching of faces and layers much more intuitive and simple to code. Now, we revert the order of the layers accordingly for the output files. 
 ```{r}
 fluxes_out_left <- fluxes_interp %>%
   left_join(faces %>% select(.fx0,left), by='.fx0') %>%
@@ -935,9 +937,10 @@ fluxes_out <- rbind(fluxes_out_left,fluxes_out_rigth) %>%
   arrange(Polygon_number,Face_number,Depth_layer) 
 
 # make an index for the new faces
-face_idx <- fluxes_out %>%
-  select(Polygon_number,Face_number) %>% 
-  distinct() %>%
+face_idx <- rbind(faces %>% select(left,.fx0) %>% set_names('Polygon_number','Face_number'),
+              faces %>% select(right,.fx0) %>% set_names('Polygon_number','Face_number')) %>%
+  distinct()%>%
+  arrange(Polygon_number,Face_number) %>%
   group_by(Polygon_number) %>%
   mutate(Face_new=row_number()) %>%
   ungroup()
@@ -946,9 +949,13 @@ face_idx <- fluxes_out %>%
 fluxes_out <- fluxes_out %>% left_join(face_idx,by=c('Polygon_number','Face_number'))
 
 # pad missing depth layers
-fluxes_out <- fluxes_out %>% complete(Depth_layer, nesting(Polygon_number,Face_new)) %>% 
-  select(Polygon_number,Face_new,Depth_layer,Flux_m3s) %>%
-  arrange(Polygon_number,Face_new,Depth_layer)
+fluxes_out <- fluxes_out %>% 
+  group_by(Polygon_number,Face_number,Face_new) %>%
+  mutate(New_depth=rev(0:(length(Polygon_number)-1))) %>% # here is where we renumber the depth layers
+  ungroup() %>% 
+  complete(New_depth,nesting(Polygon_number,Face_new)) %>% 
+  select(Polygon_number,Face_new,New_depth,Flux_m3s) %>%
+  arrange(Polygon_number,Face_new,New_depth)
 
 # add time step column (placeholder value here)
 fluxes_out <- fluxes_out %>% mutate(Time_step=1)
@@ -958,9 +965,51 @@ fluxes_out[is.na(fluxes_out)] <- 0
 
 # set columns in the right order, sort, and rename them as HC needs
 fluxes_out <- fluxes_out %>% 
-  select(Polygon_number,Face_new,Time_step,Depth_layer,Flux_m3s) %>%
+  select(Polygon_number,Face_new,Time_step,New_depth,Flux_m3s) %>%
   mutate_all(formatC,format='e',digits=8) %>%
   set_names('Polygon number','Face number','Time Step (12)hr','Depth Layer','Flux [m3/s]')
 
 #write.table(fluxes_out, '../outputs/transport.dat', quote=FALSE, row.names = FALSE, sep = '\t')
 ```
+
+## Make lookup tables
+
+Hydroconstruct needs lookup tables with this format of input files, to correctly match the flux input file (sounds like an unneccessary hoop because just above we renumber the faces and the depth layers, but it has to be some legacy reason of who implemented this input type).
+
+### Face lookup
+
+```{r}
+face_data <- face_idx %>% 
+  left_join(faces_sf %>% select(.fx0,left,right) %>% st_set_geometry(NULL),by=c('Face_number'='.fx0')) %>%
+  rowwise() %>%
+  mutate(adjacent_box=ifelse(Polygon_number==right,left,right),
+         prop =1,
+         comments=0) %>% 
+  ungroup() %>% 
+  select(Polygon_number,Face_new,adjacent_box,prop,comments) %>%
+  set_names('Polygon #','Face #','adjacent box','prop','comments') # doing same as PS
+
+write.table(face_data,'../outputs/face_data.csv', quote=FALSE, row.names = FALSE, sep = ',')
+```
+
+### Depth lookup
+
+If one follows the format of the PS file, layers are numbered from 0 to 6, where 0 is the deepest and 6 seems to be the sediment. 
+```{r}
+atlantis_depths_rev <- atlantis_depths %>%
+  filter(dz>0) %>%
+  group_by(.bx0) %>%
+  mutate(new_layer=rev(0:(length(.bx0)-1))) %>%
+  ungroup() %>%
+  complete(new_layer, nesting(.bx0)) %>%
+  arrange(.bx0,new_layer)
+  
+depth_layer <- atlantis_depths_rev %>% select(.bx0,new_layer,dz) %>%
+  pivot_wider(id_cols=.bx0,names_from=new_layer,values_from = dz) %>%
+  mutate(sed=1) %>%
+  set_names('box_id',paste0('layer',0:(max(atlantis_depths$atlantis_layer)))) # here it would be length-1 because we renumber from 0, but we added a sediment layer so it is 'length'
+
+write.table(depth_layer,'../outputs/depth_layer.csv', quote=FALSE, row.names = FALSE, sep = ',',na='_')
+```
+
+In the GOA case, there is one depth layer that never appears in the exchange file, because exchanges between boundary boxes do not seem to be resolved, and the large boundary boxes are the only ones that share the deepest layer.
