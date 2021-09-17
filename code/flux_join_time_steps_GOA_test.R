@@ -637,7 +637,7 @@ roms_to_atlantis <- function(this_file){
       mutate_all(formatC,format='e',digits=8) %>%
       set_names(c('Time Step','Polygon number','Depth Layer [m]','Vertical velocity [m3/s]','Average Temperature [Celsius]','Average Salinity [PartPer1000]'))
     
-    # think about the below when we get to do this for more than one time step
+    # write out fluxes
     if(this_file==roms_files_list[1]){
       if(time_step == roms_time[1]) {
         write.table(variables_out, 'outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
@@ -704,7 +704,7 @@ roms_to_atlantis <- function(this_file){
       mutate_all(formatC,format='e',digits=8) %>%
       set_names('Polygon number','Face number','Time Step (12)hr','Depth Layer','Flux [m3/s]')
     
-    # think about the below when we get to do this for more than one time step
+    # write output
     if(this_file==roms_files_list[1]){
       if(time_step == roms_time[1]) {
         write.table(fluxes_out, 'outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
