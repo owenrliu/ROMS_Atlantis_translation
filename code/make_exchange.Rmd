@@ -1,0 +1,447 @@
+---
+title: "Make hydro.nc"
+author: "Alberto Rovellini"
+date: "10/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(rbgm)
+library(tidync)
+library(sf)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+
+This code goes from DAT files prepared for HC to NetCDF files to force Atlantis with. It also needs the average file for the state variables because that one contains $w$. We will need to somehow account for $w$.
+
+__NOTE__: there are now a number of unnecessary hoops that we went through in preparing the data for HydroConstruct. For example, lookup tables and column naming and conversion of seconds to time steps. Drop all of this from the R code. Also using HC and dat files etc. forces us to work in 1-month chunks, which is not ideal. Refine the machinery to by-pass all these problems.
+
+# Read data
+
+Read the DAT files and the depth and faces information. 
+```{r}
+hydro <- read.table('../../outputs/short/flux.dat',header=TRUE,sep='\t')
+avg <- read.table('../../outputs/short/avg.dat',header=TRUE,sep='\t')
+
+# lookup keys
+depth <- read.csv('../../outputs/short/depth_layer.csv')
+faces <- read.csv('../../outputs/short/face_data.csv')
+
+# bgm
+atlantis_bgm <- read_bgm('C:/Users/Alberto Rovellini/Documents/GOA/ROMS/data/atlantis/GOA_WGS84_V4_final.bgm')
+atlantis_box <- atlantis_bgm %>% box_sf()
+```
+
+Set up some dimensions for later.
+```{r}
+layers <- hydro %>% select(Depth.Layer) %>% distinct() %>% pull()
+boxes <- 0:108 #hydro %>% select(Polygon.number) %>% distinct() %>% pull() # NOTE! You want to get the islands in the data!!!
+time <- hydro %>% select(Time.Step..12.hr) %>% distinct() %>% pull()
+
+nlayer <- length(layers)
+nbox <- length(boxes)
+ntime <- length(time)
+```
+
+
+Rework the depth table in a way that makes sense... PLEASE CHANGE THIS NONSENSE IN THE TRANSLATION CODE, STEER CLEAR FROM ANYTHING RELATED TO HYDROCONSTRUCT AND HOW IT INTERPRETS THE DATA. May keep depth info in the hydro data instead, like it happens in the state variables data.
+```{r}
+depth[depth=='_']<- NA
+
+depth <- depth %>% select(-layer6) %>% 
+  mutate_if(is.character, as.numeric) %>% # ditch sediment - do not think it is needed in the fluxes
+  pivot_longer(cols = starts_with('layer'), names_to = 'layer', values_to = 'depth') %>%
+  mutate(layer = as.numeric(str_replace(layer,'layer',''))) %>%
+  drop_na() %>%
+  arrange(box_id,desc(layer)) %>%
+  group_by(box_id) %>%
+  mutate(lower = cumsum(depth),
+         upper = lag(lower,default = 0),
+         dz = lower-upper)
+
+depth_all <- expand.grid(box_id=unique(depth$box_id),layer=unique(depth$layer)) %>%
+  left_join(depth,by=c('box_id','layer'))
+```
+
+# Add up flows
+
+This puts the DAT file  s in the format that Atlantis needs. There is (minimal...) information on the hydro.nc file structure [here](https://confluence.csiro.au/display/Atlantis/Current+Forcing+File+Structure) and [here](https://confluence.csiro.au/display/Atlantis/Hydro+files+-+format+description).
+
+This must include the correction for hyperdiffusion, based on box area and shape (e.g. EW length vs NS length).
+
+## Some important (and tricky) technical details
+
+How is 'dest' worked out in these NC files? Check HC, this is important because it defines the dimensions of the NetCDF. It seems to be, for any one cell in the model, the number of destinations of the water leaving the cell. For example, consider cell $C_{b=1,z=0}$. This cell has fluxes to: $C_{0,0}$, $C_{2,0}$, and $C_{3,0}$ (i.e. different boxes and same layer), but also sends water to $C_{1,1}$, i.e. a different layer of the source box. In this case, dest_b=4. Examples available online seem to suggest that $C_{1,0}$ may also exchange water with, for example, $C_{2,1}$, in a flux to a different layer of a different box. I do not think this will happen in the GOA model, but keep an eye for it. Sometimes there are also flows from a cell to itself. I do not think this should happen for the GOA model. This seems to depend a lot on the structure of the ROMS-derived files. 
+
+It sounds like this will have to be a combination of the horizontal transports and the vertical velocities, with vertical velocities only capturing linkages between layers of the same box. So following the previous example, dest_b for $C_{1,0}$ at ts=1 may be dest_b=c(0,1,2,3) and dest_k = c(0,1,0,0), in that the exchange happens with the neighboring 0 layers AND with the layer above. For some cells, it may be the layer above and below, but according to this logic there should never be more than 2 entries for the same box that the cell belongs to in dest_k for a cell. 
+
+It is unclear to me why dest_b and dest_k need to be repeated at each time step. Short of having a zero flux (unlikely), a cell will always be connected to the same cells around, above, and below it.
+
+Horizontal fluxes have been following the lr convention for their sign so far, but from here on out it makes more sense to think about source and destination boxes instead. We will need to bring in info from the bgm for each exchange to figure out if it *leave* (negative) or *enters* the focal box. Then we will need to make sure we only count fluxes once. The easiest way is to *assume* that for a time step, if there are two identical fluxes of opposite sign we should only consiuder one of them. There is a chance this will be wrong though, and we should come up with something more appropriate, like check that such flux is also between the same two cells. If that is the case, scrap it.
+
+Vertical fluxes $w$ always go through the bottom of a cell. For these and for the horizontal fluxes, it sounds like __fluxes must only be listed once__ (see Q2 [here](https://confluence.csiro.au/pages/viewpage.action?spaceKey=Atlantis&title=Hydro+FAQ)). As a consequence, dest_b and dest_k also need to only be listed once. That is, when you list dest_b for $C_{0,0}$ you cannot include $C_{1,0}$ again as combination of dest_b and dest_k. 
+
+Start with one time step of the horizontal transport. If a box communicate to another box through several faces, we need to add up the fluxes through those faces as net exchange between source and destination box.
+
+__NOTE__: what is the unit? $m^3$ for the entire time step or $m^3s^{-1}$? The latter is what we have.
+```{r}
+# # test with one time step
+# hydro_test <- hydro %>% 
+#   filter(Time.Step..12.hr==1)
+
+# component to dest_b from horizontal fluxes, i.e. fluxes from the same depth in another box
+dest_b_horizontal <- hydro %>% left_join(faces %>% select(-prop,-comments), by=c('Polygon.number'='Polygon..',
+                                                                            'Face.number'='Face..')) # please fix these names....
+
+
+# TODO the correction for hyperdiffusion needs to be done here I think, where an individual flux enters a box through a face
+dest_b_horizontal <- dest_b_horizontal %>% 
+  group_by(Time.Step..12.hr,Polygon.number,Depth.Layer,adjacent.box) %>%
+  summarise(Exchange = sum(Flux..m3.s.)) %>% 
+  ungroup()
+
+# # need to reintroduce info about depth of each layer for the source box, as this will allow correct layer mapping
+dest_b_horizontal <- dest_b_horizontal %>% left_join(depth_all,by=c('Polygon.number'='box_id','Depth.Layer'='layer'))
+
+# now need to introduce the depth layer of the destination box that matches the depth layer of the source box.
+map_dest_k <- function(dest_box,source_upper){
+  dest_k <- depth_all %>% filter(box_id==dest_box,upper==source_upper) %>% pull(layer)
+  dest_k <- ifelse(identical(dest_k, numeric(0)),NA,dest_k) # we may want to remove this for speed and change after
+  return(dest_k)
+}
+
+dest_horizontal_tmp <- dest_b_horizontal %>% # this step takes a long time
+  mutate(dest_k=purrr::map2(adjacent.box,upper,map_dest_k)) %>%
+  unnest(cols = c(dest_k))
+
+# rename the columns to understand better
+# FIXME: adjust the names in the R code, bypass the nonsensical spelling for HC
+dest_horizontal <- dest_horizontal_tmp %>% 
+  select(Time.Step..12.hr,Polygon.number,Depth.Layer,adjacent.box,dest_k,Exchange) %>%
+  set_names('ts','source_b','source_k','dest_b','dest_k','exchange') #%>%
+  #drop_na() 
+
+#TODO:
+# I would like to  remove the empty dest_k, which denote horizontal exchanges that do not occurr between layers of the source box and non-existent neighboring layers (for example, box x and box y are neighbors, but x is much deeper than y and so layer 0 of box x does not have horizontal exchanges with box y. One notable exception here is box 0 layer 0, which talks to all boxes but through vertical fluxes through the bottom only). However, doing so drop rows from the final array, which needs to have one line per ts*source_b*source_k, because it basically drops the source_k layers that give a flux to nothing
+# Easiest solution which also should be harmless is to replace NA's with 0 (all boxes have layer 0, even the shallowest). This will send a 0 flux to the 0'th layer of those boxes.
+
+# For now: set the NA layers to 0. This will not matter when we add up the fluxes to the destinations
+dest_horizontal[is.na(dest_horizontal)]<-0
+
+#FIXME in the R code. we do not have island boxes in the hydro file, which I am pretty sure I going to get back to bite us, 
+```
+
+
+```{r}
+# DO THIS BELOW NOW AFTER rbind() WITH VERTICAL DF
+
+# dest_horizontal <- dest_horizontal %>% 
+#   #select(ts:dest_b) %>%
+#   group_by(ts,source_b,source_k) %>%
+#   nest() %>%
+#   mutate(dest_b = purrr::map(data, ~t(.x$dest_b)),
+#          dest_k = purrr::map(data, ~t(.x$dest_k)),
+#          exchange = purrr::map(data, ~t(.x$exchange)))#,
+#          #these_dests = purrr::map(data, nrow)) # number of destinations, the maximum of this is 8
+# 
+# # work out the maximum number of destinations from horizontal fluxes
+# # ndest <- max(unlist(dest_horizontal$these_dests))
+```
+**These are duplicated fluxes at the moment, i.e. we are counting both flux from A to B and flux from B to A (and they have opposite sign).**
+
+Do the same with the vertical fluxes. These will be within the same box: for each cell, write the flux to the layer above and below (if there are any). How did we do with the bottom layers again? Suck up from the bottom and have $C_{0,0}$ contribute it?
+
+Then we will need to concatenate them and then pad with 0s (the underscore is interpreted as 0 if one uses 0 as a fillvalue, which we will). 
+
+It looks like any flux into layer 0 of any box comes from the bottom, and it will be a flux from box 0 layer 0. This will require tweaking the bit above.
+
+A negative value in ROMS denotes an upward flux. Atlantis seems to interpret upward fluxes as positive. That means, any given layer through its bottom will have a positive flux coming in or a negative flux going out. Same for the next layer up. However, a cell has a flux going through its ceiling that is the opposite of the flux through the floor of the call above? But the cell above will interpet an upward flux as positive too, so we cannot just flip the sign. Look at it in terms of source and destination boxes instead. For a cell: positive flux comes in, a negative flux goes out, it does not matter if it through the floor or the ceiling. 
+
+In all of this we are not actually balancing fluxes... which will be another problem (boxes *will* disappear or explode...). If we do calculate w as vertical residue of the horizontal fluxes we will need to do so here, after the correction for hyperdiffusion.
+
+We have: flux through bottom of a face. Sign indicates direction: positive = downwards.
+We need: flux from a cell to the next layers. Given a focal cell (box*layer), an outflow is negative, and an influx is positive (how does the lr business feed into this??).
+
+So, for a focal cell other than 0: reported flux is a flux from the layer below. Negative is influx, positive is outflow (because of ROMS).
+```{r}
+vert <- avg %>% select(Time.Step:Vertical.velocity..m3.s.,layer)
+
+# replace depth layer with numbered layer 
+# FIXME do this in the R code
+# vert <- vert %>% left_join(depth_all %>% select(box_id,layer,lower), by=c('Polygon.number'='box_id',
+#                                                                           'Depth.Layer..m.'='lower'))
+
+dest_vertical <- vert %>% complete(layer,nesting(Time.Step,Polygon.number)) %>%
+  select(Time.Step,Polygon.number,layer,Vertical.velocity..m3.s.) %>%
+  arrange(Time.Step,Polygon.number,layer) %>%
+  set_names(c('ts','source_b','source_k','exchange_vert')) %>%
+  mutate(dest_b=source_b) %>%
+  group_by(ts,source_b) %>%
+  mutate(dest_k=lead(source_k,default=0), # note: default=0 here denotes a flux from layer 5 of a box (the surface) to layer 0 of the same box (bottom). This does not exist and it serves the purpose of handling NA's for now - it works because w out of layer 5 of all boxes is NA too so no impact on actual flux calcs
+         exchange = lead(exchange_vert,default=0)) %>% # these are all flows from focal box to box above. A negative value means an upward flux, which means a negative flux for the focal cell ("give"); a positive value indicates a downward flux (because of ROMS), so a flux into the focal cell from the cell above. So it happens to not need any modification? There should be no flow out of the top layer.
+  select(-exchange_vert)
+
+# store as vectors although may not need to do that
+# dest_b_vertical <- test2 %>% select(dest_b)
+# dest_k_vertical <- test2 %>% select(dest_k)
+# exchange_vertical <- test2 %>% select(exchange_new)
+```
+
+FIXME: very small boxes with no ROMS points are missing. Assign to those boxes all values of the nearest box (to the corresponding layers).
+
+## Flows from outside the model domain through the bottom of Atlantis
+
+Now make one vector with the vertical exchanges from box 0 layer 0 to all layer 0 in the model domain that get a flow through their bottom. This is an important assumption that needs to be documented in the code. 
+
+1. Take data frame of vertical exchanges (vert)
+2. Subset to deepest layer (0).
+3. transpose to a very long vector (should be 109 long except we do not have vert exchanges for all boxes as some do not have values from ROMS in hydro file, fix this in ROMS code by assigning value of nearest box adjusted by the area of that box - important for flows that are multiplied by area). This vector will be the destinations of box 0 layer 0, to all other bottom cells in the system, including itself.
+```{r}
+bottom_flows <- vert %>% filter(layer==0) # fluxes through the bottom of all 0 layers (deepest in each box)
+
+missing_boxes <- c(34, 86, 94) # boxes 34, 86, 94 do not have a bottom flow into them. Why? Are they deeper than all ROMS points? These will need to be padded with zeroes
+
+# for now stitch a zero value for fluxes into the missing boxes to the bottom here - this whole bit will go away when we fix the R code
+time_steps <- unique(bottom_flows$Time.Step)
+new_rows <- matrix(nrow=length(time_steps)*length(missing_boxes),ncol=ncol(bottom_flows))
+
+test <- expand.grid('ts'=time_steps,'b'=missing_boxes)
+test <- test %>% mutate(layer=0) %>%
+  left_join(depth_all %>% select(box_id,layer,lower), by = c('b'='box_id','layer'='layer')) %>% # island boxes do not have depth
+  mutate(exchange=0) %>%
+  select(ts,b,lower,exchange,layer) %>%
+  set_names(colnames(bottom_flows))
+
+# stitch to bottom flows
+
+bottom_flows <- rbind(bottom_flows,test)
+bottom_flows <- bottom_flows %>% arrange(Time.Step,Polygon.number)
+
+# turn this into a horizontal data frame with rows = ts*source_b*source_k where source_b=source_k=0, and then dest_b as t(bottom_flows$Polygon.number) and dest_k=t(bottom_flows$Depth.Layer) and same for exchange
+
+bottom_dest <- bottom_flows %>% 
+  select(-Depth.Layer..m.) %>%
+  group_by(Time.Step) %>%
+  nest() %>%
+  mutate(dest_b = purrr::map(data, ~t(.x$Polygon.number)),
+         dest_k = purrr::map(data, ~t(.x$layer)), # these should all be 0's
+         exchange = purrr::map(data, ~t(.x$Vertical.velocity..m3.s.)),
+         ldb = purrr::map(dest_b,length), # these are checks that we have all destinations
+         ldk = purrr::map(dest_k,length), # these are checks that we have all destinations
+         lex = purrr::map(exchange,length), # these are checks that we have all destinations
+         source_b = 0,
+         source_k = 0) %>% 
+  select('ts'=Time.Step,source_b,source_k,dest_b,dest_k,exchange)
+```
+
+For the GOA model, the maximum number of destination $ndest$ is 1+108+HORIZONTAL FLUXES for $B_{0,0}$, because it has water exchanges with $B_{0,1}$ and with all 0 layers in the model, except itself (is this true?). So it looks like all other rows will have to be of the same size. Is this going to affect the size of our NetCDF files?
+
+## Bring it all together
+
+Join horizontal and vertical destinations. All the NAs will become 0. This may need to happen earlier but let's try here.
+
+When stitching we need to be careful that we do not have the same b*k combo more than once. This will be particularly important for box 0 layer 0, where we may have both a horizontal flux to a neighboring box and a vertical flux through the bottom of said neighboring box. These instances will need to be summed and entered only once.
+```{r}
+# dest_b_all <- dest_horizontal %>% left_join(dest_vertical, by = c('ts','source_b','source_k'))
+# 
+# dest_b_all <- dest_b_all %>% 
+#   mutate(dest_b = purrr::map2(dest_b.x,dest_b.y,c),
+#          dest_k = purrr::map2(dest_k.x,dest_k.y,c),
+#          exchange_tot = purrr::map2(exchange,exchange_vert,c)) %>%
+#   select(ts,source_b,source_k,dest_b,dest_k,exchange_tot)
+# 
+# # tie in the vertical fluxes from box 0,0 to all bottom layers (simulating influx from outside the model domain)
+# dest_b_all <- dest_b_all %>% 
+#   left_join(bottom_dest, by = c('ts','source_b','source_k')) %>%
+#   mutate(dest_b = purrr::map2(dest_b.x,dest_b.y,c),
+#          dest_k = purrr::map2(dest_k.x,dest_k.y,c),
+#          exchange_all = purrr::map2(exchange_tot,exchange,c)) %>%  # names are messy, make this meaningful
+#   select(ts,source_b,source_k,dest_b,dest_k,exchange_all)
+# 
+# # here is where it gets tricky
+# # IMPORTANT: if you sum things up here, they may not show as opposite fluxes when you check that you are not duplicating fluxes. 
+# # Also need to deal with NAs before this point
+# test <- dest_b_all %>% #filter(ts==1,source_b==1,source_k==1) %>%
+#   unnest(cols = c(dest_b, dest_k, exchange_all)) %>%
+#   ungroup() %>% 
+#   #select(dest_b,dest_k,exchange_tot) %>%
+#   group_by(ts,source_b,source_k,dest_b,dest_k) %>%
+#   summarise(exchange_tot = sum(exchange_all,na.rm = TRUE)) %>% 
+#   ungroup()
+# 
+# # for each row, 
+```
+
+Alternative: just bind vertical and horizontal fluxes.
+```{r}
+dest_all <- rbind(dest_horizontal,dest_vertical) %>%
+  arrange(ts,source_b,source_k,dest_b,dest_k)
+
+# set NA exchanges to 0
+dest_all[is.na(dest_all)]<-0
+
+# nest this
+dest_all <- dest_all %>%
+  #select(ts:dest_b) %>%
+  group_by(ts,source_b,source_k) %>%
+  nest() %>%
+  mutate(dest_b = purrr::map(data, ~t(.x$dest_b)),
+         dest_k = purrr::map(data, ~t(.x$dest_k)),
+         exchange = purrr::map(data, ~t(.x$exchange))) %>%
+  select(-data)
+
+# tie in the vertical fluxes from box 0,0 to all bottom layers (simulating influx from outside the model domain)
+dest_all <- dest_all %>%
+  left_join(bottom_dest, by = c('ts','source_b','source_k')) %>%
+  mutate(dest_b = purrr::map2(dest_b.x,dest_b.y,c),
+         dest_k = purrr::map2(dest_k.x,dest_k.y,c),
+         exchange_all = purrr::map2(exchange.x,exchange.y,c)) %>%  # names are messy, make this meaningful
+  select(ts,source_b,source_k,dest_b,dest_k,exchange_all)
+
+# here is where it gets tricky
+# IMPORTANT: if you sum things up here, they may not show as opposite fluxes when you check that you are not duplicating fluxes.
+# Also need to deal with NAs before this point
+all_fluxes <- dest_all %>% #filter(ts==1,source_b==1,source_k==1) %>%
+  unnest(cols = c(dest_b, dest_k, exchange_all)) %>%
+  ungroup() %>%
+  #select(dest_b,dest_k,exchange_tot) %>%
+  group_by(ts,source_b,source_k,dest_b,dest_k) %>%
+  summarise(exchange_tot = sum(exchange_all,na.rm = TRUE)) %>%
+  ungroup()
+```
+
+Now reshape this horizontally and:
+1. Make sure it has ts\*source_b\*source_k number of rows.
+2. Pad each row and dest so that hey all have the same amount of cells
+3. Split into three data frames: dest_b, dest_k, exchange
+4. Bind into an array with the option of reshaping it (need to see what we need from Hem's code)
+```{r}
+# 1.
+all_fluxes1 <- all_fluxes %>% 
+  group_by(ts,source_b,source_k) %>%
+  nest() %>% 
+  mutate(dest_b = purrr::map(data, ~t(.x$dest_b)),
+         dest_k = purrr::map(data, ~t(.x$dest_k)),
+         exchange = purrr::map(data, ~t(.x$exchange_tot))) %>%
+  select(-data)
+
+# 2. first, get the longest vector
+ndest <- all_fluxes1 %>% mutate(ndest=purrr::map_dbl(dest_b,length)) %>% pull(ndest) %>% max() # 108 at the moment, which is 0:108-(58,62,63)+0+6 (so 109-3+2=108). This is because there is no flux through the bottom of three boxes, and 
+
+all_fluxes2 <- all_fluxes1 %>%
+  mutate(dest_b_long = purrr::map(dest_b,function(x) c(x,rep(NA,(ndest-length(x))))),# is NA the best choice here?
+         dest_k_long = purrr::map(dest_k,function(x) c(x,rep(NA,(ndest-length(x))))),# is NA the best choice here?
+         exchange_long = purrr::map(exchange,function(x) c(x,rep(0,(ndest-length(x)))))) %>% # is 0 the best choice here?
+  select(-c(dest_b,dest_k,exchange)) %>%
+  ungroup()
+
+#3. Set up 3 arrays, one for each variable
+dest_b <- all_fluxes2 %>% # destination boxes
+  select(dest_b_long) %>% 
+  unlist() %>% 
+  matrix(ncol=ndest,byrow=T) %>% 
+  t() %>%
+  as.array(dim = c(ndest,nlayer*nbox*ntime))
+
+dest_k <- all_fluxes2 %>% # destination layers
+  select(dest_k_long) %>% 
+  unlist() %>% 
+  matrix(ncol=ndest,byrow=T) %>% 
+  t() %>%
+  as.array(dim = c(ndest,nlayer*nbox*ntime))
+
+exchange <- all_fluxes2 %>% #exchanges
+  select(exchange_long) %>% 
+  unlist() %>% 
+  matrix(ncol=ndest,byrow=T) %>% 
+  t() %>%
+  as.array(dim = c(ndest,nlayer*nbox*ntime))
+```
+
+# Pack to NetCDF
+
+Here we need to write out the variables and the flows to a NetCDF file.
+
+What shape does the array need to have to get that done? See Hem's file.
+
+The array in Hem's code for state variables has dim=c(layer,box,time). For the exchange file, we have those and k (ndest). Creating the file should be easy, the only issue I am not too sure about is what structure is needed for the arrays.
+
+1. To start, use the order like in the temp code: from most nested outward. So, ndest,layers,boxes,time steps. Make an array with the information above and this structure.
+2. add all the info on time steps, time units, etc. as needed in the function from Hem's code.
+
+```{r}
+# change the dimension of the arrays for dest and exchange so that instead of being a large matrix they become a 4-dimensional array. The below seems to work
+dim(dest_b) <- c(ndest,nlayer,nbox,ntime)
+dim(dest_k) <- c(ndest,nlayer,nbox,ntime)
+dim(exchange) <- c(ndest,nlayer,nbox,ntime)
+```
+
+```{r}
+# info on the run
+this_geometry <- "GOA_WGS84_V4_final.bgm"
+this_title <- "Advection between boxes"
+
+# the below is entered manually but it may be automated from the BGM file instead, especially using rbgm
+#options depth dimension
+depth_bins <- 1:7 # 0 30 70 100 300 500 2969 in GOA. It seems to include sediment in PS
+d_units <- "depth layers"
+
+#options exchanges
+ex_units <- "m3"
+
+#options time dimension
+timestep <- 12 # 12 hour timesteps
+t_units <- "seconds since 2017-01-01 00:00:00" # be careful with your start date here, just to try now
+# time.unit.length <- 2 # years
+seconds_timestep <- 60*60*12
+time_array <- array((1:ntime)*seconds_timestep)
+
+
+make_hydro <- function(eachvariable, nc_name, t_units, seconds_timestep, this_title, this_geometry, time_array, exchange_array, dest_b_array, dest_k_array) {
+  
+  nc_file <- create.nc(nc_name)
+  
+  dim.def.nc(nc_file, "t", unlim=TRUE)
+  dim.def.nc(nc_file, "b", 109) # manual 
+  dim.def.nc(nc_file, "z", 7) # manual 
+  dim.def.nc(nc_file, "dest", 108) # manual 
+  
+  var.def.nc(nc_file, "t", "NC_DOUBLE", "t")
+  var.def.nc(nc_file, eachvariable, "NC_DOUBLE", c("dest","z","b","t"))
+  var.def.nc(nc_file, "dest_b", "NC_INT", c("dest","z","b","t"))
+  var.def.nc(nc_file, "dest_k", "NC_INT", c("dest","z","b","t"))
+  
+  att.put.nc(nc_file, eachvariable, "_FillValue", "NC_DOUBLE", 0)
+  att.put.nc(nc_file, "dest_b", "_FillValue", "NC_INT", -1)
+  att.put.nc(nc_file, "dest_k", "_FillValue", "NC_INT", -1)
+  att.put.nc(nc_file, "exchange", "units", "NC_CHAR", ex_units)
+  att.put.nc(nc_file, "t", "units", "NC_CHAR", t_units)
+  att.put.nc(nc_file, "t", "dt", "NC_DOUBLE", seconds_timestep)
+  att.put.nc(nc_file, "NC_GLOBAL", "title", "NC_CHAR", this_title)
+  att.put.nc(nc_file, "NC_GLOBAL", "geometry", "NC_CHAR", this_geometry)
+  att.put.nc(nc_file, "NC_GLOBAL", "parameters", "NC_CHAR", "")
+  
+  var.put.nc(nc_file, "t", time_array)
+  var.put.nc(nc_file, "dest_b", dest_b_array)
+  var.put.nc(nc_file, "dest_k", dest_k_array)
+  var.put.nc(nc_file, eachvariable, exchange_array)
+  
+  close.nc(nc_file)
+  
+  #system(paste("ncdump ",nc.name," > ", cdf.name,sep=" "), wait = TRUE)
+}
+
+make_hydro("exchange", nc_name="goa_hydro.nc", t_units, seconds_timestep, this_title, this_geometry, time_array, exchange_array=exchange, dest_b_array=dest_b, dest_k_array=dest_k)
+
+```
+
+
