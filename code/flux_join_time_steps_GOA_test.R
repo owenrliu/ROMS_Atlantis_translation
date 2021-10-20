@@ -19,7 +19,7 @@ map <- purrr::map
 options(dplyr.summarise.inform=FALSE)
 
 # roms_files_list <- list.files(here::here('data','roms'), pattern = 'nep5_avg', full.names = TRUE)
-roms_files_list <- list.files('C:/Users/Alberto Rovellini/Documents/GOA/ROMS/data/roms/nep_test', full.names = TRUE)
+roms_files_list <- list.files('C:/Users/Alberto Rovellini/Documents/GOA/ROMS/data/roms/nep_test/short/', full.names = TRUE)
 
 # read first ROMS data for depth and grid info - assumes this does not change between time steps and ROMS files
 romsfile <- roms_files_list[1]
@@ -401,7 +401,7 @@ faces_u_thin <- faces_u_join %>%
 faces_u_join_with_depth <- face_depths %>%
   left_join(faces_u_thin, by = c(".fx0")) %>%
   ungroup() %>%
-  drop_na() %>% # turn this on or off depending on whether we want to have NA fluxes in non-existing layers or not, cannot recall what HydroCOnstruct wants
+  #drop_na() %>% # turn this on or off depending on whether we want to have NA fluxes in non-existing layers or not, cannot recall what HydroCOnstruct wants
   select(.fx0,atlantis_layer,dz_max,xi_u,eta_u,uidx,face_area) %>%
   group_by(uidx,.fx0) %>%
   mutate(maxz=-cumsum(dz_max),minz=-lag(-maxz,default=0)) %>%
@@ -416,7 +416,7 @@ faces_v_thin <- faces_v_join %>%
 faces_v_join_with_depth <- face_depths %>%
   left_join(faces_v_thin, by = c(".fx0")) %>%
   ungroup() %>%
-  drop_na() %>%
+  #drop_na() %>%
   select(.fx0,atlantis_layer,dz_max,xi_v,eta_v,vidx,face_area) %>%
   group_by(vidx,.fx0) %>%
   mutate(maxz=-cumsum(dz_max),minz=-lag(-maxz,default=0)) %>%
@@ -630,7 +630,7 @@ roms_to_atlantis <- function(this_file){
     
     variables_out <- boxes_statevars_interp %>%
       left_join(boxes_w_interp %>% select(.bx0,atlantis_layer,net_w),by=c('.bx0','atlantis_layer')) %>%
-      drop_na() %>%
+      #drop_na() %>%
       mutate(time_step = time_step, maxz = -maxz) %>% # how to turn this into iteration over time stesp? Either ts from NetCDF, or just iteration # of the function
       ungroup() %>%
       select(time_step,.bx0,maxz,net_w,temperature_mean,salt_mean) %>%
@@ -640,12 +640,12 @@ roms_to_atlantis <- function(this_file){
     # write out fluxes
     if(this_file==roms_files_list[1]){
       if(time_step == roms_time[1]) {
-        write.table(variables_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
+        write.table(variables_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/short/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
       } else {
-        write.table(variables_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
+        write.table(variables_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/short/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
       }
     } else {
-      write.table(variables_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
+      write.table(variables_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/short/state_vars_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
     }
     
     # write out fluxes
@@ -669,7 +669,12 @@ roms_to_atlantis <- function(this_file){
     
     fluxes_out <- rbind(fluxes_out_left,fluxes_out_rigth) %>% 
       distinct() %>% 
-      arrange(Polygon_number,Face_number,Depth_layer) 
+      arrange(Polygon_number,Face_number,Depth_layer)
+    
+    # Does the depth layer exist in the focal box? If yes, keep the NA flux. If not, ditch the row.
+    fluxes_out <- fluxes_out %>% left_join(atlantis_depths %>% filter(dz>0) %>% select(.bx0,atlantis_layer,minz), 
+                                           by=c('Polygon_number'='.bx0','Depth_layer'='atlantis_layer')) %>%
+      filter(!is.na(minz)) %>% select(-minz)
     
     # make an index for the new faces
     face_idx <- rbind(faces %>% select(left,.fx0) %>% set_names('Polygon_number','Face_number'),
@@ -707,12 +712,12 @@ roms_to_atlantis <- function(this_file){
     # write output
     if(this_file==roms_files_list[1]){
       if(time_step == roms_time[1]) {
-        write.table(fluxes_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
+        write.table(fluxes_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/short/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE)
       } else {
-        write.table(fluxes_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
+        write.table(fluxes_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/short/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
       }
     } else {
-      write.table(fluxes_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
+      write.table(fluxes_out, 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/short/transport_test.dat', quote=FALSE, row.names = FALSE, sep = '\t', append = TRUE, col.names = FALSE)
     }
     
   }
@@ -750,7 +755,7 @@ face_data <- face_idx %>%
   select(Polygon_number,Face_new,adjacent_box,prop,comments) %>%
   set_names('Polygon #','Face #','adjacent box','prop','comments') # doing same as PS
 
-write.table(face_data,'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/face_data.csv', quote=FALSE, row.names = FALSE, sep = ',')
+write.table(face_data,'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/short/face_data.csv', quote=FALSE, row.names = FALSE, sep = ',')
 
 # depth lookup. We need to drop the layers where dz=0, but that drops the island boxes, so we need to add a flag for those
 atlantis_depths_rev <- atlantis_depths %>%
@@ -773,4 +778,4 @@ depth_layer <- atlantis_depths_rev %>% select(.bx0,new_layer,dz) %>%
 depth_layer[depth_layer==0] <- NA
 depth_layer[1,1] <- 0 # restore box 0
 
-write.table(depth_layer,'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/depth_layer.csv', quote=FALSE, row.names = FALSE, sep = ',',na='_')
+write.table(depth_layer,'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/short/depth_layer.csv', quote=FALSE, row.names = FALSE, sep = ',',na='_')

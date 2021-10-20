@@ -43,9 +43,9 @@ From Mike Jacox 12/28/20 -
 *The larger one is a sample of what the ROMS output looks like, with all variables (only physics in this example, no biogeochemistry). The other file has the depths that go with the 3D variables. At this stage I think you'll be most interested in temp, salinity, and currents. Variable names (and associated dimensions) for those are: temp (rho) salt (rho) u (u) v (v) w (w)*
 
 ```{r}
-romsfile <- here::here('data','roms','test.nc')
+romsfile <- 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/data/roms/test.nc'
 roms <- tidync(romsfile)
-romsfile2 <- here::here('data','roms','NEP_grid_5a.nc')
+romsfile2 <- 'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/data/roms/NEP_grid_5a.nc'
 roms2 <- tidync(romsfile2)
 ```
 
@@ -74,7 +74,7 @@ roms2_vars <- hyper_grids(roms2) %>% # all available grids in the ROMS ncdf
 
 ```{r}
 # Boundary geometry file from Atlantis
-atlantis_bgm <- read_bgm(here('data','atlantis','GOA_WGS84_V4_final.bgm'))
+atlantis_bgm <- read_bgm('C:/Users/Alberto Rovellini/Documents/GOA/ROMS/data/atlantis/GOA_WGS84_V4_final.bgm')
 #Atlantis geometry as an sf shapefile
 atlantis_sf <- atlantis_bgm %>% box_sf()
 ggplot(atlantis_sf)+
@@ -206,7 +206,6 @@ vxy <- append_xy_coords(roms_v,lon_col="lon_v",lat_col="lat_v")%>% mutate(vidx=r
 # # obtain find nearest-neighbor of bgm faces on ROMS grid
 # roms_face_rho <- angstroms::romsmap(project_to(rbgm::faceSpatial(bgm), "+init=epsg:4326"), roms_ll_rho)
 ```
-
 
 # Faces and Angles
 
@@ -1024,6 +1023,7 @@ mean_w_at_interface <- w_at_interface %>%
   ungroup() %>%
   mutate(net_w=mean_w*area)
 ```
+**NOTE**: the bottom layer of some boxes has no values of $w$ at the bottom interface. I suspect this is because the all ROMS points in that cell are shallower than the bottom of the Atlantis box. This is not an issue *per se* as long as we maintain the *NA* entry for those layers for $w$, however it does mean that that cell has no flow of water from below. If the cell also has no flow of water in or out from neighboring boxes (for example because it is deeper than all of its neighbors), fluxes may be impossible to balance over time because the only exchange will occur with the layer above those cells, if one is present. **Keep an eye on boxes 34, 86, 94, if something suspicions happens there we will have to re-evaluate**.
 
 **IMPORTANT**: I am not able to see, in this ROMS input file, whether a negative w corresponds to an upward or downward velocity. This is crucial to this step and it may change between ROMS, so we need to find a way to automatically recognize it or check for it (HydroConstruct considers positive fluxes as going *up*, and negative fluxes as going *down*).
 
@@ -1143,7 +1143,7 @@ faces_u_thin <- faces_u_join %>%
 faces_u_join_with_depth <- face_depths %>%
   left_join(faces_u_thin, by = c(".fx0")) %>%
   ungroup() %>%
-  drop_na() %>% # turn this on or off depending on whether we want to have NA fluxes in non-existing layers or not, cannot recall what HydroCOnstruct wants
+  #drop_na() %>% # turn this on or off depending on whether we want to have NA fluxes in non-existing layers or not, cannot recall what HydroCOnstruct wants
   select(.fx0,atlantis_layer,dz_max,xi_u,eta_u,uidx,face_area) %>%
   group_by(uidx,.fx0) %>%
   mutate(maxz=-cumsum(dz_max),minz=-lag(-maxz,default=0)) %>%
@@ -1158,7 +1158,7 @@ faces_v_thin <- faces_v_join %>%
 faces_v_join_with_depth <- face_depths %>%
   left_join(faces_v_thin, by = c(".fx0")) %>%
   ungroup() %>%
-  drop_na() %>%
+  #drop_na() %>%
   select(.fx0,atlantis_layer,dz_max,xi_v,eta_v,vidx,face_area) %>%
   group_by(vidx,.fx0) %>%
   mutate(maxz=-cumsum(dz_max),minz=-lag(-maxz,default=0)) %>%
@@ -1543,7 +1543,7 @@ Use `boxes_salt_temperature_interp` and `mean_w_at_interface` objects. Join them
 ```{r}
 variables_out <- boxes_salt_temperature_interp %>% 
   left_join(mean_w_at_interface %>% select(.bx0,atlantis_layer,net_w),by=c('.bx0','atlantis_layer')) %>%
-  drop_na() %>%
+  #drop_na() %>%
   mutate(time_step = 1, maxz = -maxz) %>% # how to turn this into iteration over time stesp? Either ts from NetCDF, or just iteration # of the function
   ungroup() %>%
   select(time_step,.bx0,maxz,net_w,temperature_mean,salt_mean) %>%
@@ -1594,7 +1594,12 @@ fluxes_out_rigth <- fluxes_interp %>%
 
 fluxes_out <- rbind(fluxes_out_left,fluxes_out_rigth) %>% 
   distinct() %>% 
-  arrange(Polygon_number,Face_number,Depth_layer) 
+  arrange(Polygon_number,Face_number,Depth_layer)
+
+# Does the depth layer exist in the focal box? If yes, keep the NA flux. If not, ditch the row.
+fluxes_out <- fluxes_out %>% left_join(atlantis_depths %>% filter(dz>0) %>% select(.bx0,atlantis_layer,minz), 
+                                        by=c('Polygon_number'='.bx0','Depth_layer'='atlantis_layer')) %>%
+  filter(!is.na(minz)) %>% select(-minz)
 
 # make an index for the new faces
 face_idx <- rbind(faces %>% select(left,.fx0) %>% set_names('Polygon_number','Face_number'),
