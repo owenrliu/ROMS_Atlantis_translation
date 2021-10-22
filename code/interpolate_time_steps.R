@@ -119,7 +119,8 @@ fill_time_steps_12h <- function(roms_data,statevars){
                                 'Face.number'=faces[Iface],
                                 'Time.Step..12.hr'=complete,
                                 'Depth.Layer'=layers[Ilyr],
-                                Flux..m3.s.)
+                                Flux..m3.s.,
+                                'FaceID'=this_cell$FaceID[1])
           df_all <- rbind(df_all,df_long)
         }
       }

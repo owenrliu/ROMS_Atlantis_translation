@@ -693,8 +693,8 @@ roms_to_atlantis <- function(this_file){
       group_by(Polygon_number,Face_number,Face_new) %>%
       mutate(New_depth=rev(0:(length(Polygon_number)-1))) %>% # here is where we renumber the depth layers
       ungroup() %>% 
-      complete(New_depth,nesting(Polygon_number,Face_new)) %>% 
-      select(Polygon_number,Face_new,New_depth,Flux_m3s) %>%
+      complete(New_depth,nesting(Polygon_number,Face_number,Face_new)) %>% 
+      select(Polygon_number,Face_new,New_depth,Flux_m3s,Face_number) %>%
       arrange(Polygon_number,Face_new,New_depth)
     
     # add time step column
@@ -705,9 +705,9 @@ roms_to_atlantis <- function(this_file){
     
     # set columns in the right order, sort, and rename them as HC needs
     fluxes_out <- fluxes_out %>% 
-      select(Polygon_number,Face_new,Time_step,New_depth,Flux_m3s) %>%
+      select(Polygon_number,Face_new,Time_step,New_depth,Flux_m3s,Face_number) %>%
       mutate_all(formatC,format='e',digits=8) %>%
-      set_names('Polygon number','Face number','Time Step (12)hr','Depth Layer','Flux [m3/s]')
+      set_names('Polygon number','Face number','Time Step (12)hr','Depth Layer','Flux [m3/s]','FaceID')
     
     # write output
     if(this_file==roms_files_list[1]){
@@ -752,8 +752,8 @@ face_data <- face_idx %>%
          prop =1,
          comments=0) %>% 
   ungroup() %>% 
-  select(Polygon_number,Face_new,adjacent_box,prop,comments) %>%
-  set_names('Polygon #','Face #','adjacent box','prop','comments') # doing same as PS
+  select(Polygon_number,Face_new,adjacent_box,prop,comments,Face_number) %>%
+  set_names('Polygon #','Face #','adjacent box','prop','comments','FaceID') # doing same as PS
 
 write.table(face_data,'C:/Users/Alberto Rovellini/Documents/GOA/ROMS/outputs/short/face_data.csv', quote=FALSE, row.names = FALSE, sep = ',')
 
