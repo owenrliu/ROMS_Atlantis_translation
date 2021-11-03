@@ -223,8 +223,8 @@ fill_time_steps_12h <- function(roms_data,statevars){
         df_all <- rbind(df_all,df_long)
       }
     }
-    df_all <- df_all %>% arrange(Time.Step,Polygon.number,Depth.Layer..m.) %>%
-      mutate(Time.Step=(as.numeric(difftime(Time.Step,t_0,units = 'hours'))/12)+1) # replace the true time with a time step counter - seems to be what HC needs
+    df_all <- df_all %>% arrange(Time.Step,Polygon.number,Depth.Layer..m.) #%>%
+      #mutate(Time.Step=(as.numeric(difftime(Time.Step,t_0,units = 'hours'))/12)+1) # replace the true time with a time step counter - seems to be what HC needs
 
   } else { # ...and for fluxes between boxes
     for(Ibox in 1:length(boxes)){
@@ -248,8 +248,8 @@ fill_time_steps_12h <- function(roms_data,statevars){
         }
       }
     }
-    df_all <- df_all %>% arrange(Time.Step..12.hr,Polygon.number,Face.number,Depth.Layer) %>%
-      mutate(Time.Step..12.hr=(as.numeric(difftime(Time.Step..12.hr,t_0,units = 'hours'))/12)+1) # replace the true time with a time step counter - seems to be what HC needs
+    df_all <- df_all %>% arrange(Time.Step..12.hr,Polygon.number,Face.number,Depth.Layer) #%>%
+      #mutate(Time.Step..12.hr=(as.numeric(difftime(Time.Step..12.hr,t_0,units = 'hours'))/12)+1) # replace the true time with a time step counter - seems to be what HC needs
 
   }
   return(df_all)
@@ -262,14 +262,14 @@ roms_hydro_interp <- fill_time_steps_12h(roms_data = roms_hydro,statevars = FALS
 
 #############################################################
 # some plotting
-b <- sample(unique(roms_state_vars$Polygon.number),1)
-l <- 0
-
-plot(roms_state_vars %>% filter(Polygon.number==b,layer==l) %>% pull(Time.Step),
-     roms_state_vars %>% filter(Polygon.number==b,layer==l) %>% pull(Vertical.velocity..m3.s.))
-
-plot(roms_state_vars_interp %>% filter(Polygon.number==b,layer==l) %>% pull(Time.Step),
-     roms_state_vars_interp %>% filter(Polygon.number==b,layer==l) %>% pull(Vertical.velocity..m3.s.))
+# b <- sample(unique(roms_state_vars$Polygon.number),1)
+# l <- 0
+# 
+# plot(roms_state_vars %>% filter(Polygon.number==b,layer==l) %>% pull(Time.Step),
+#      roms_state_vars %>% filter(Polygon.number==b,layer==l) %>% pull(Vertical.velocity..m3.s.))
+# 
+# plot(roms_state_vars_interp %>% filter(Polygon.number==b,layer==l) %>% pull(Time.Step),
+#      roms_state_vars_interp %>% filter(Polygon.number==b,layer==l) %>% pull(Vertical.velocity..m3.s.))
 #############################################################
 
 # rename columns to replace '.' with ' ' (probably we can change the ROMS transformation code to skip a couple of these flips back and forth)
