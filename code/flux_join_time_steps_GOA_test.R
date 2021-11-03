@@ -120,15 +120,21 @@ empty_boxes<- boxes_rho_join %>%
   filter(is.na(rhoidx)) %>% 
   select(.bx0) %>% 
   distinct() %>% pull()
-paste0("Atlantis boxes with no ROMS points are boxes ",paste(empty_boxes,collapse = ","))
+print(paste0("Atlantis boxes with no ROMS points are boxes ",paste(empty_boxes,collapse = ",")))
 
 # ... and one for which faces do not intercept u and v points
-empty_faces<- faces_u_join %>% 
+empty_faces_u<- faces_u_join %>% 
   st_set_geometry(NULL) %>% 
   filter(is.na(uidx)) %>% 
   select(.fx0) %>% 
   distinct() %>% pull()
-paste0("Atlantis faces with no u points are faces ",paste(empty_faces,collapse = ","))
+print(paste0("Atlantis faces with no u points are faces ",paste(empty_faces_u,collapse = ",")))
+empty_faces_v<- faces_v_join %>% 
+  st_set_geometry(NULL) %>% 
+  filter(is.na(uidx)) %>% 
+  select(.fx0) %>% 
+  distinct() %>% pull()
+print(paste0("Atlantis faces with no v points are faces ",paste(empty_faces_v,collapse = ",")))
 
 # get indeces of rho, u, and v points that overlap with Atlantis geometry, to subset large ROMS files and reduce memory chokes
 min_xi_rho <- min(boxes_rho_join$xi_rho, na.rm = TRUE)
@@ -557,7 +563,10 @@ roms_to_atlantis <- function(this_file){
         pluck('interp_within_depths') %>% 
         bind_rows() %>% 
         pluck('val') %>% 
-        mean(na.rm=T)
+        mean(na.rm=T) # this produces NaN if all values are NA's (e.g. for maxz=0)
+      if(is.nan(interp_var)) interp_var<-NA
+      
+      return(interp_var)
     }
     
     # state variables, but not w
@@ -570,8 +579,9 @@ roms_to_atlantis <- function(this_file){
     w_at_interface <- boxes_rho_join_with_depth %>% left_join(w_interp, by = c('xi_rho','eta_rho','rhoidx'))
     
     # function to match w at rho points within each box at the exact depth where Atlantis layers meet
+    # default behavior is that if no w points are present at the interface (happens most often at the deepest depth, if the Atlantis box is deeper than the rho points), it takes the closest value of w to the interface
     pull_w_at_depth <- function(maxz,interp){
-      w_at_depth <- interp %>% filter(depth==round(maxz)) %>% select(val) %>% pull()
+      w_at_depth <- interp %>% filter(depth==interp$depth[which.min(abs(maxz-interp$depth))]) %>% select(val) %>% pull()
       return(w_at_depth)
     }
     

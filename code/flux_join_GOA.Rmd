@@ -303,6 +303,24 @@ empty_boxes<- boxes_rho_join %>%
 paste0("Atlantis boxes with no ROMS points are boxes ",paste(empty_boxes$box_id,collapse = ","))
 ```
 
+And which faces do not have u and v points?
+```{r}
+# ... and one for which faces do not intercept u and v points
+empty_faces_u<- faces_u_join %>% 
+  st_set_geometry(NULL) %>% 
+  filter(is.na(uidx)) %>% 
+  select(.fx0) %>% 
+  distinct() %>% pull()
+print(paste0("Atlantis faces with no u points are faces ",paste(empty_faces_u,collapse = ",")))
+empty_faces_v<- faces_v_join %>% 
+  st_set_geometry(NULL) %>% 
+  filter(is.na(vidx)) %>% 
+  select(.fx0) %>% 
+  distinct() %>% pull()
+print(paste0("Atlantis faces with no v points are faces ",paste(empty_faces_v,collapse = ",")))
+```
+
+
 # Dealing with Depth
 
 We need to match Atlantis box depth layers to the appropriate depths from ROMS. We need to use the thickness of depths layers *specific to this Atlantis model*, because not all Atlantis models have the same total number of depth layers.
@@ -923,7 +941,10 @@ match_interpolated_data <- function(interp_dat,rhoidx_vec,minz,maxz){
     pluck('interp_within_depths') %>% 
     bind_rows() %>% 
     pluck('val') %>% 
-    mean(na.rm=T)
+    mean(na.rm=TRUE) # this produces NaN if all values are NA's (e.g. for maxz=0)
+  if(is.nan(interp_var)) interp_var<-NA
+  
+  return(interp_var)
   
   # if(nrow(interp_var)==0) return(NA)
   
@@ -1001,7 +1022,7 @@ Write function that only keeps the depth-value pairs at the interface between la
 w_at_interface <- boxes_rho_join_with_depth %>% left_join(w_interp, by = c('xi_rho','eta_rho','rhoidx'))
 
 pull_w_at_depth <- function(maxz,interp){
-  w_at_depth <- interp %>% filter(depth==round(maxz)) %>% select(val) %>% pull()
+  w_at_depth <- interp %>% filter(depth==interp$depth[which.min(abs(maxz-interp$depth))]) %>% select(val) %>% pull()
   return(w_at_depth)
 }
 
@@ -1024,8 +1045,9 @@ mean_w_at_interface <- w_at_interface %>%
   mutate(net_w=mean_w*area)
 ```
 **NOTE**: the bottom layer of some boxes has no values of $w$ at the bottom interface. I suspect this is because the all ROMS points in that cell are shallower than the bottom of the Atlantis box. This is not an issue *per se* as long as we maintain the *NA* entry for those layers for $w$, however it does mean that that cell has no flow of water from below. If the cell also has no flow of water in or out from neighboring boxes (for example because it is deeper than all of its neighbors), fluxes may be impossible to balance over time because the only exchange will occur with the layer above those cells, if one is present. **Keep an eye on boxes 34, 86, 94, if something suspicions happens there we will have to re-evaluate**.
+**UPDATE 11/1/2021** Regarding this, I fixed it so that for each rho point it takes the value of $w$ closest to the interface. If the interface is shallower than the rho point (i.e. normal case for most layers), the value of w at the depth break is taken; if the interface is deeper than the deepest vertical layer for that rho point, the next closest value is taken. This yields many more points in the bottom layers and will hopefully help with flux balancing too.
 
-**IMPORTANT**: I am not able to see, in this ROMS input file, whether a negative w corresponds to an upward or downward velocity. This is crucial to this step and it may change between ROMS, so we need to find a way to automatically recognize it or check for it (HydroConstruct considers positive fluxes as going *up*, and negative fluxes as going *down*).
+**IMPORTANT**: I am not able to see, in this ROMS input file, whether a negative w corresponds to an upward or downward velocity. This is crucial to this step and it may change between ROMS, so we need to find a way to automatically recognize it or check for it (HydroConstruct considers positive fluxes as going *up*, and negative fluxes as going *down*). Convention for ROMS, including the NEP 10K and CGOA 3K, is that negative $w$ indicates an upward water velocity, but one should always check in their ROMS or else it may all be upside down.
 
 Plot to have a look.
 ```{r}
@@ -1036,7 +1058,6 @@ atlantis_sf %>% left_join(mean_w_at_interface,by='.bx0') %>%
   scale_fill_viridis()+
   theme_minimal()
 ```
-In CGOA and NEP ROMS (and in most ROMS), negative $w$ means an upward flow.
 
 # Calculate Fluxes
 
@@ -1174,14 +1195,18 @@ match_interpolated_velocities <- function(interp_dat,idx_vec,minz,maxz){
   if('uidx'%in%names(interp_var)){
     interp_var<-interp_var%>%filter(uidx%in%idx_vec)
   }else{
-     interp_var<-interp_var%>%filter(vidx%in%idx_vec)}
+    interp_var<-interp_var%>%filter(vidx%in%idx_vec)}
   interp_var<-interp_var %>%    # filter depths
     mutate(interp_within_depths=purrr::map(interp, ifelse(maxz==0,function(df) df %>% mutate(val = NA), function(df) df %>% filter(between(depth,maxz,minz))))) %>% # write out NAs if the thickness of the depth layer is 0 m, i.e. for non-existing Atlantis layers
     # unpack the interpolated data and calculate a mean across relevant rho points and depths
     pluck('interp_within_depths') %>% 
     bind_rows() %>% 
     pluck('val') %>% 
-    mean(na.rm=T)
+    mean(na.rm=T) # this produces NaN if all values are NA's (e.g. for maxz=0)
+  
+  if(is.nan(interp_var)) interp_var<-NA
+  
+  return(interp_var)
 }
 ```
 
@@ -1211,7 +1236,8 @@ faces_uv_interp <- faces_depths_uvpts %>%
   #mutate(temperature_mean=purrr::pmap_dbl(list(rhoidx_vec=rhovec,minz=minz,maxz=maxz),match_interpolated_data,interp_dat=temperature_interp))
 glimpse(faces_uv_interp)
 ```
-
+**NOTE**: this step above finds $u$ and $v$ points matches also in those areas of the faces that do not exist. For example, if a box is 2000 m deep and its neighbor is 350 m deep, the method above will match all the $u$ and $v$ points with the face between the two boxes all the way down to -2000 m. The following step of multiplying the velocities across a face by the area of the face to obtain the flux solves the problem, in that velocities deeper than 350 m (in this example) will be dropped.
+**NOTE 2**: this last step returns a lot of NAs. These seem to be in the deep layers where no $u$ and/or $v$ points are deep enough for a layer of a box. That is, the deepest layer of a face may have fewer $u$ and/or $v$ points than its shallower counterparts, or none. In a way this is similar to the vertical velocities through the bottom layers of the deep boxes. However, while in that case we used the closest value of $w$, here it is not that simple because we are not pulling values of the velocity at an intreface but we are averaging over all points within the buffer around a face. In addition, we cannot pull values from shallower layers because those are already used by shallower layers of the face, as opposed to shallower values of $w$ that simply fall just a little above the interface. Default behavior is to keep the NAs and lack of flux where the model domain goes much deeper than the ROMS.
 
 ```{r}
 # as of March 2021 we are not pulling w out of ROMS, instead we're using it to close fluxes
