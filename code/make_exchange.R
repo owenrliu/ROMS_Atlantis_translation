@@ -1,5 +1,7 @@
 # Alberto Rovellini 11/2/2021
-# This is step 3A of the ROMS workflow.
+#################################
+# This is step 3A of the ROMS workflow
+#################################
 # 
 # This will need to be looped for monthly files, as larger forcing files will become unwieldy.
 # 
@@ -29,11 +31,11 @@ select <- dplyr::select
 
 # Read data
 #Read the DAT files and the depth and faces information. 
-hydro <- read.table('../../../outputs/short/flux.dat',header=TRUE,sep='\t')
-avg <- read.table('../../../outputs/short/avg.dat',header=TRUE,sep='\t') # need this for the vertical fluxes
+hydro <- read.table('../../outputs/short/flux.dat',header=TRUE,sep='\t')
+avg <- read.table('../../outputs/short/avg.dat',header=TRUE,sep='\t') # need this for the vertical fluxes
 
 # lookup keys
-depth <- read.csv('../../../outputs/short/depth_layer.csv')
+depth <- read.csv('../../outputs/short/depth_layer.csv')
 
 # bgm
 atlantis_bgm <- read_bgm('C:/Users/Alberto Rovellini/Documents/GOA/ROMS/data/atlantis/GOA_WGS84_V4_final.bgm')
@@ -261,8 +263,6 @@ exchange <- all_fluxes2 %>% #exchanges
 
 # Here we need to write out the variables and the flows to a NetCDF file.
 
-
-
 # change the dimension of the arrays for dest and exchange so that instead of being a large matrix they become a 4-dimensional array. The below seems to work
 dim(dest_b) <- c(ndest,nlayer,nbox,ntime)
 dim(dest_k) <- c(ndest,nlayer,nbox,ntime)
@@ -283,7 +283,7 @@ ex_units <- "m3"
 
 #options time dimension
 timestep <- 12 # 12 hour timesteps
-t_units <- "seconds since 2017-01-01 00:00:00" # TODO: get this from the input data - should it be absolute or relative to the file?
+t_units <- paste("seconds since",time[1],sep=" ") # should it be absolute or relative to the file?
 # time.unit.length <- 2 # years
 seconds_timestep <- 60*60*12
 time_array <- array((1:ntime)*seconds_timestep)
