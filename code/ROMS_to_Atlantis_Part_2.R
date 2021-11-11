@@ -24,8 +24,8 @@ library(lubridate)
 select <- dplyr::select
 
 # read data - consider that you may have a number of data input files - how does HC decide which came first? Merge them all together?
-file_statevars <- '../../outputs/short/state_vars_test.dat'
-file_transport <- '../../outputs/short/transport_test.dat'
+file_statevars <- '../../outputs/2017/state_vars_test.dat'
+file_transport <- '../../outputs/2017/transport_test.dat'
 
 roms_state_vars <- read.csv(file_statevars,sep='\t',header = T)
 roms_hydro <- read.csv(file_transport,sep='\t',header = T)
@@ -52,7 +52,7 @@ state_var_files <- split((roms_state_vars %>% mutate(Month=month(Time.Step),
               f = ~Monthyear)
 lapply(state_var_files, function(x) {
   x1 <- x %>% select(-Month,-Year,-Monthyear)
-  write.table(x1, file=paste0('../../outputs/short/monthly/pre-interp/',x$Monthyear[1],'_statevars.dat'), quote=FALSE, row.names = FALSE, sep='\t')})
+  write.table(x1, file=paste0('../../outputs/2017/monthly/pre-interp/',x$Monthyear[1],'_statevars.dat'), quote=FALSE, row.names = FALSE, sep='\t')})
 
 hydro_files <- split((roms_hydro %>% mutate(Month=month(Time.Step..12.hr),
                                                      Year=year(Time.Step..12.hr),
@@ -60,14 +60,14 @@ hydro_files <- split((roms_hydro %>% mutate(Month=month(Time.Step..12.hr),
                          f = ~Monthyear)
 lapply(hydro_files, function(x) {
   x1 <- x %>% select(-Month,-Year,-Monthyear)
-  write.table(x1, file=paste0('../../outputs/short/monthly/pre-interp/',x$Monthyear[1],'_hydro.dat'), quote=FALSE, row.names = FALSE, sep='\t')})
+  write.table(x1, file=paste0('../../outputs/2017/monthly/pre-interp/',x$Monthyear[1],'_hydro.dat'), quote=FALSE, row.names = FALSE, sep='\t')})
 
 #############################################################
 # Read in all monthly files at the same time - state variables and hydro
 # maqke the entire code below a function - for now containing the other function...
 # run that funtion on all files with lapply or purrr - use a flag for statevars or not
 
-roms_files <- list.files('../../outputs/short/monthly/pre-interp/',full.names = TRUE)
+roms_files <- list.files('../../outputs/2017/monthly/pre-interp/',full.names = TRUE)
 
 # write one function that fills the empty boxes and creates data at every 12h
 
@@ -318,14 +318,14 @@ roms_dat_file_cleaner <- function(roms_file){
     #colnames(roms_data_interp) <- c(colnames(read.csv(file_statevars,sep='\t',check.names = FALSE)),"layer")
     #export
     monthyear <- paste(month(roms_data_interp$Time.Step[1]),year(roms_data_interp$Time.Step[1]),sep = '_')
-    write.table(roms_data_interp, paste0('../../outputs/short/monthly/post-interp/',monthyear,'_avg.dat'),
+    write.table(roms_data_interp, paste0('../../outputs/2017/monthly/post-interp/',monthyear,'_avg.dat'),
                 quote=FALSE, row.names = FALSE, sep = '\t')
   } else {
     roms_data_interp <- fill_time_steps_12h(roms_data = roms_data,statevars = FALSE)
     #colnames(roms_data_interp) <- colnames(read.csv(file_transport,sep='\t',check.names = FALSE))
     #export
     monthyear <- paste(month(roms_data_interp$Time.Step..12.hr[1]),year(roms_data_interp$Time.Step..12.hr[1]),sep = '_')
-    write.table(roms_data_interp, paste0('../../outputs/short/monthly/post-interp/',monthyear,'_flux.dat'),
+    write.table(roms_data_interp, paste0('../../outputs/2017/monthly/post-interp/',monthyear,'_flux.dat'),
                 quote=FALSE, row.names = FALSE, sep = '\t')
     
   }

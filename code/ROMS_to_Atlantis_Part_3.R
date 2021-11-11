@@ -35,12 +35,12 @@ select <- dplyr::select
 # Read data
 #make lists of the avg and hydro files, post-interpolation
 
-roms_files <- list.files('../../outputs/short/monthly/post-interp/',full.names = TRUE)
+roms_files <- list.files('../../outputs/2017/monthly/post-interp/',full.names = TRUE)
 hydro_files <- roms_files[grepl('flux',roms_files)]
 avg_files <- roms_files[grepl('avg',roms_files)]
 
 # read in depth lookup key
-depth_key <- read.csv('../../outputs/long/depth_layer.csv') # TODO: bypass this
+depth_key <- read.csv('../../outputs/2017/depth_layer.csv') # TODO: bypass this
 
 # read in bgm
 atlantis_bgm <- read_bgm('C:/Users/Alberto Rovellini/Documents/GOA/ROMS/data/atlantis/GOA_WGS84_V4_final.bgm')
@@ -57,7 +57,7 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   
   monthyear <- sub('.*post-interp/ *(.*?) *_flux.*','\\1',hydro_file) # get the month-year index
   
-  avg_file <- avg_files[grepl(monthyear,avg_files)]
+  avg_file <- avg_files[grepl(paste0('/',monthyear),avg_files)]
   
   hydro <- read.table(hydro_file,header=TRUE,sep='\t')
   avg <- read.table(avg_file,header=TRUE,sep='\t') # need this for the vertical fluxes
@@ -341,7 +341,7 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   }
   
   make_hydro("exchange", 
-             nc_name=paste0("../../outputs/short/monthly/forcings/goa_hydro_",monthyear,".nc"), 
+             nc_name=paste0("../../outputs/2017/monthly/forcings/goa_hydro_",monthyear,".nc"), 
              t_units, 
              seconds_timestep, 
              this_title, 

@@ -18,7 +18,7 @@ select <- dplyr::select
 atlantis_bgm <- read_bgm('../../data/atlantis/GOA_WGS84_V4_final.bgm')
 atlantis_box <- atlantis_bgm$boxes
 
-roms_files <- list.files('../../outputs/short/monthly/post-interp/',full.names = TRUE)
+roms_files <- list.files('../../outputs/2017/monthly/post-interp/',full.names = TRUE)
 avg_files <- roms_files[grepl('avg',roms_files)]
 
 make_statevars_nc <- function(avg_file, atlantis_sf=atlantis_box){
@@ -203,7 +203,7 @@ make_statevars_nc <- function(avg_file, atlantis_sf=atlantis_box){
   }
   
   make_statevars("temperature", 
-                 nc_name=paste0("../../outputs/short/monthly/forcings/goa_roms_temp_",monthyear,".nc"), 
+                 nc_name=paste0("../../outputs/2017/monthly/forcings/goa_roms_temp_",monthyear,".nc"), 
                  t_units, 
                  seconds_timestep, 
                  this_title, 
@@ -214,7 +214,7 @@ make_statevars_nc <- function(avg_file, atlantis_sf=atlantis_box){
                  nlayer=length(depth_bins))
   
   make_statevars("salinity", 
-                 nc_name=paste0("../../outputs/short/monthly/forcings/goa_roms_salt_",monthyear,".nc"), 
+                 nc_name=paste0("../../outputs/2017/monthly/forcings/goa_roms_salt_",monthyear,".nc"), 
                  t_units, 
                  seconds_timestep, 
                  this_title, 
