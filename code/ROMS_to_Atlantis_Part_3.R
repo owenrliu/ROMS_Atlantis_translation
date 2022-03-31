@@ -1,5 +1,5 @@
 # Alberto Rovellini 
-# 11/2/2021
+# 3/31/2022
 #################################
 # Step 3: from DAT exchange files to hydro.nc
 #################################
@@ -53,7 +53,7 @@ faces <- atlantis_bgm$faces %>% select(-label)
 # function to apply the whole routine
 # TODO: move functions to a different file
 
-make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=faces, depth=depth_key, hyperdiff=0){
+make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=faces, depth=depth_key, fluxperts=F, hyperdiff=0){
   
   monthyear <- sub('.*post-interp/ *(.*?) *_flux.*','\\1',hydro_file) # get the month-year index
   
@@ -108,8 +108,8 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
                                           by=c('Polygon.number'='box_id','Depth.Layer'='layer')) # layer of the source box
   
   # keep both fluxes, but set the second exchange to 0. This way we keep the source-destination interaction, but there is no water getting exchanged
-  # if the upper depth is NA, keep the (empy) fluxes as they are because they are between empty layers but need to be there
-  # if there is one flux only across a face, it means that it's a layer that is not share by both boxes (e.g. one box is deeper) and the flux out of it is 0.
+  # if the upper depth is NA, keep the (empty) fluxes as they are because they are between empty layers but need to be there
+  # if there is one flux only across a face, it means that it's a layer that is not shared by both boxes (e.g. one box is deeper) and the flux out of it is 0.
   handle_duplicate_flows <- function(upper,data){
     if(!is.na(upper) & nrow(data)>1) data[2,]$Flux..m3.s.<-0 else data
     return(data)
@@ -124,15 +124,16 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   
   ## Hyperdiffusion correction
   # For now only implementing the division by area of the destination box. 
-  # **NOTE**: do vertical fluxes need to be corrected by cell thickness? 
+  # Vertical fluxes should also be corrected by cell area 
   # If horizontal and vertical fluxes are not on a comparable scale, adding them up to a destination box will cause the 
   # vertical flux to be the main contribution, potentially by orders of magnitude, thus creating a system that is only governed by vertical mixing!
   
   if(hyperdiff>0){ # 0 = do not do anything, 1= divide by area in m2, 2 = ?
-    hydro_one_flux <- hydro_one_flux %>% 
-      left_join(atlantis_sf %>% select(box_id,area) %>% st_set_geometry(NULL), by = c('adjacent.box'='box_id'))
     if(hyperdiff==1){
-      hydro_one_flux <- hydro_one_flux %>% mutate(Flux_source_dest=Flux_source_dest/area)
+      hydro_one_flux <- hydro_one_flux %>% 
+        left_join((atlantis_sf %>% st_set_geometry(NULL) %>% select(box_id,area)), by = c('adjacent.box'='box_id')) %>%
+        mutate(Flux_source_dest=Flux_source_dest/area) %>%
+        select(-area)
     } else {
       stop('This method of hyperdiffusion correction has not been implemented yet')
     }
@@ -153,7 +154,7 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
     return(dest_k)
   }
   
-  dest_horizontal_tmp <- dest_b_horizontal %>% # this step takes a long time
+  dest_horizontal_tmp <- dest_b_horizontal %>% # this step takes a long time, ~15-20 minutes per month
     mutate(dest_k=purrr::map2(adjacent.box,upper,map_dest_k)) %>%
     unnest(cols = c(dest_k))
   
@@ -183,8 +184,32 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
            exchange = -1*lead(exchange_vert,default=0)) %>% # 11/04/2021 these are all flows from focal box to box above. A negative value means an upward flux in ROMS, which means a positive flux from the focal cell ("give"); 
     select(-exchange_vert)
   
+  # correct for hyperdiffusion also in the vertical dimension if you do it in the horizontal, or else vertical exchanges will dominate the hydrodynamics
+  if(hyperdiff>0){
+    if(hyperdiff==1){
+      dest_vertical <- dest_vertical %>% 
+        left_join((atlantis_sf %>% st_set_geometry(NULL) %>% select(box_id, area)), by = c('dest_b'='box_id')) %>%
+        mutate(exchange = exchange/area) %>%
+        select(-area)
+    } else {
+      stop('This method of hyperdiffusion correction has not been implemented yet')
+    }
+  }
+  
   ## Flows from outside the model domain through the bottom of Atlantis
   bottom_flows <- vert %>% filter(layer==0) # fluxes through the bottom of all 0 layers (deepest in each box)
+  
+  # correct for hyperdiffusion
+  if(hyperdiff>0){
+    if(hyperdiff==1){
+      bottom_flows <- bottom_flows %>% 
+        left_join((atlantis_sf %>% st_set_geometry(NULL) %>% select(box_id, area)), by = c('Polygon.number'='box_id')) %>%
+        mutate(Vertical.velocity..m3.s. = Vertical.velocity..m3.s./area) %>%
+        select(-area)
+    } else {
+      stop('This method of hyperdiffusion correction has not been implemented yet')
+    }
+  }
   
   # turn this into a horizontal data frame with rows = ts*source_b*source_k where source_b=source_k=0, 
   bottom_dest <- bottom_flows %>% 
@@ -278,6 +303,11 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
     t() %>%
     as.array(dim = c(ndest,nlayer*nbox*ntime)) # turn to array to pack to NetCDF
   
+  # the flux is still in m3/s here. Convert to m3 per time step optionally
+  if(isTRUE(fluxperts)) {
+    exchange <- exchange * 60*60*12
+  }
+  
   #####################################################################################
   # Pack to NetCDF
   
@@ -341,7 +371,7 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   }
   
   make_hydro("exchange", 
-             nc_name=paste0("../../outputs/2017/monthly/forcings/goa_hydro_",monthyear,".nc"), 
+             nc_name=paste0("../../outputs/2017/monthly/forcings/netflux_noHD/goa_hydro_",monthyear,".nc"), 
              t_units, 
              seconds_timestep, 
              this_title, 
@@ -356,4 +386,4 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   
 }
 
-lapply(hydro_files,make_exchange_nc)
+lapply(hydro_files,make_exchange_nc, fluxperts=T)
