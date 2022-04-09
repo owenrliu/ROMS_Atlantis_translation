@@ -122,23 +122,6 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
     select(-data) %>%
     unnest(cols = OneFlux)
   
-  ## Hyperdiffusion correction
-  # For now only implementing the division by area of the destination box. 
-  # Vertical fluxes should also be corrected by cell area 
-  # If horizontal and vertical fluxes are not on a comparable scale, adding them up to a destination box will cause the 
-  # vertical flux to be the main contribution, potentially by orders of magnitude, thus creating a system that is only governed by vertical mixing!
-  
-  if(hyperdiff>0){ # 0 = do not do anything, 1= divide by area in m2, 2 = ?
-    if(hyperdiff==1){
-      hydro_one_flux <- hydro_one_flux %>% 
-        left_join((atlantis_sf %>% st_set_geometry(NULL) %>% select(box_id,area)), by = c('adjacent.box'='box_id')) %>%
-        mutate(Flux_source_dest=Flux_source_dest/area) %>%
-        select(-area)
-    } else {
-      stop('This method of hyperdiffusion correction has not been implemented yet')
-    }
-  }
-  
   ## Horizontal fluxes
   # sum up fluxes bewteen the same source and destination but across different faces
   dest_b_horizontal <- hydro_one_flux %>% 
@@ -148,6 +131,7 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   
   # now need to introduce the depth layer of the destination box that matches the depth layer of the source box.
   # FIXME: can we preserve this information from the R code instead?
+  # If we just kept consistent layering from the surface down we could probably avoid all this
   map_dest_k <- function(dest_box,source_upper){
     dest_k <- depth_all %>% filter(box_id==dest_box,upper==source_upper) %>% pull(layer)
     dest_k <- ifelse(identical(dest_k, numeric(0)),NA,dest_k) # we may want to remove this for speed and change after
@@ -168,8 +152,6 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   # For now: set the NA layers to 0. This will not matter when we add up the fluxes to the destinations
   dest_horizontal[is.na(dest_horizontal)]<-0
   
-  #FIXME we do not have island boxes in the hydro file, because they have depth=0
-  
   ## Vertical fluxes
   vert <- avg %>% select(Time.Step:Vertical.velocity..m3.s.,layer)
   
@@ -184,79 +166,52 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
            exchange = -1*lead(exchange_vert,default=0)) %>% # 11/04/2021 these are all flows from focal box to box above. A negative value means an upward flux in ROMS, which means a positive flux from the focal cell ("give"); 
     select(-exchange_vert)
   
-  # correct for hyperdiffusion also in the vertical dimension if you do it in the horizontal, or else vertical exchanges will dominate the hydrodynamics
-  if(hyperdiff>0){
-    if(hyperdiff==1){
-      dest_vertical <- dest_vertical %>% 
-        left_join((atlantis_sf %>% st_set_geometry(NULL) %>% select(box_id, area)), by = c('dest_b'='box_id')) %>%
-        mutate(exchange = exchange/area) %>%
-        select(-area)
-    } else {
-      stop('This method of hyperdiffusion correction has not been implemented yet')
-    }
-  }
-  
   ## Flows from outside the model domain through the bottom of Atlantis
   bottom_flows <- vert %>% filter(layer==0) # fluxes through the bottom of all 0 layers (deepest in each box)
   
+  # treat Polygon.number as source, 0,0 as dest, and make sure that the sign makes sense:
+  # from ROMS, flows up (into 0 through its bottom) are negative, and flows down (out of 0 through its bottom) are positive
+  # this should align with how it is for hydro.nc (positive flux leaves the box)
+  
+  dest_bottom <- bottom_flows %>% 
+    mutate(dest_b = 0, dest_k = 0) %>%
+    select(Time.Step,Polygon.number,layer,dest_b,dest_k,Vertical.velocity..m3.s.) %>%
+    set_names(c('ts','source_b','source_k','dest_b','dest_k','exchange'))
+  
+  #####################################################################################
+  ## Bring it all together
+  dest_all <- rbind(dest_horizontal,dest_vertical,dest_bottom) %>%
+    arrange(ts,source_b,source_k,dest_b,dest_k)
+  
   # correct for hyperdiffusion
+  # 4/8/2022 using the area of the box of arrival of the flux:
+  # if the flux is negative (incoming) divide by area of source box,
+  # if the flux is positive (outgoing) divide by area of dest box.
   if(hyperdiff>0){
     if(hyperdiff==1){
-      bottom_flows <- bottom_flows %>% 
-        left_join((atlantis_sf %>% st_set_geometry(NULL) %>% select(box_id, area)), by = c('Polygon.number'='box_id')) %>%
-        mutate(Vertical.velocity..m3.s. = Vertical.velocity..m3.s./area) %>%
-        select(-area)
+      
+      dest_all <- dest_all %>%
+        left_join((atlantis_sf %>% st_set_geometry(NULL) %>% select(box_id, area)), by = c('source_b'='box_id')) %>%
+        left_join((atlantis_sf %>% st_set_geometry(NULL) %>% select(box_id, area)), by = c('dest_b'='box_id')) %>%
+        rename(area_source = area.x, area_dest = area.y) %>%
+        rowwise() %>%
+        mutate(exchange = ifelse(exchange<0, exchange/area_source, exchange/area_dest)) %>%
+        ungroup() %>%
+        select(-area_source,-area_dest)
+        
     } else {
       stop('This method of hyperdiffusion correction has not been implemented yet')
     }
   }
-  
-  # turn this into a horizontal data frame with rows = ts*source_b*source_k where source_b=source_k=0, 
-  bottom_dest <- bottom_flows %>% 
-    select(-Depth.Layer..m.) %>%
-    group_by(Time.Step) %>%
-    nest() %>%
-    mutate(dest_b = purrr::map(data, ~t(.x$Polygon.number)),
-           dest_k = purrr::map(data, ~t(.x$layer)), # these should all be 0's
-           #exchange = purrr::map(data, ~t(.x$Vertical.velocity..m3.s.)),
-           exchange = purrr::map(data, ~ -1*t(.x$Vertical.velocity..m3.s.)), #11/04/2021 negative flux into floor of layer zero is in fact a positive flux given by b0,0; positive flux out of floor is in fact a flux going into b0,0; so, flip signs
-           source_b = 0, # all these fluxes come from box 0 layer 0
-           source_k = 0) %>% 
-    select('ts'=Time.Step,source_b,source_k,dest_b,dest_k,exchange)
-  
-  #####################################################################################
-  ## Bring it all together
-  dest_all <- rbind(dest_horizontal,dest_vertical) %>%
-    arrange(ts,source_b,source_k,dest_b,dest_k)
   
   # set NA exchanges to 0
   dest_all[is.na(dest_all)]<-0
   
-  # nest this
-  dest_all <- dest_all %>%
-    #select(ts:dest_b) %>%
-    group_by(ts,source_b,source_k) %>%
-    nest() %>%
-    mutate(dest_b = purrr::map(data, ~t(.x$dest_b)),
-           dest_k = purrr::map(data, ~t(.x$dest_k)),
-           exchange = purrr::map(data, ~t(.x$exchange))) %>%
-    select(-data)
-  
-  # tie in the vertical fluxes from box 0,0 to all bottom layers (simulating influx from outside the model domain)
-  dest_all <- dest_all %>%
-    left_join(bottom_dest, by = c('ts','source_b','source_k')) %>%
-    mutate(dest_b = purrr::map2(dest_b.x,dest_b.y,c), # concatenate dests and exchanges
-           dest_k = purrr::map2(dest_k.x,dest_k.y,c),
-           exchange_all = purrr::map2(exchange.x,exchange.y,c)) %>% 
-    select(ts,source_b,source_k,dest_b,dest_k,exchange_all)
-  
   #sum fluxes from the same source to the same destination
-  all_fluxes <- dest_all %>% #filter(ts==1,source_b==1,source_k==1) %>%
-    unnest(cols = c(dest_b, dest_k, exchange_all)) %>%
-    ungroup() %>%
-    #select(dest_b,dest_k,exchange_tot) %>%
+  #for example 0,0 talks to 4,0 and 6,0 through horizontal and vertical exchange
+  all_fluxes <- dest_all %>% 
     group_by(ts,source_b,source_k,dest_b,dest_k) %>%
-    summarise(exchange_tot = sum(exchange_all,na.rm = TRUE)) %>%
+    summarise(exchange_tot = sum(exchange,na.rm = TRUE)) %>%
     ungroup()
   
   # Now reshape this horizontally 
@@ -272,7 +227,7 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   if(nrow(all_fluxes1)-(ntime*nbox*nlayer)!=0) stop('The rows of the CDF file are not time*box*layer')
   
   # 2. get the longest vector
-  ndest <- all_fluxes1 %>% mutate(ndest=purrr::map_dbl(dest_b,length)) %>% pull(ndest) %>% max() # 111 at the moment, which is 0:108+0+6 (so 109+2=111). 
+  ndest <- all_fluxes1 %>% mutate(ndest=purrr::map_dbl(dest_b,length)) %>% pull(ndest) %>% max() # 10 with new method 
   
   all_fluxes2 <- all_fluxes1 %>%
     mutate(dest_b_long = purrr::map(dest_b,function(x) c(x,rep(NA,(ndest-length(x))))),# is NA the best choice here?
@@ -371,7 +326,7 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   }
   
   make_hydro("exchange", 
-             nc_name=paste0("../../outputs/2017/monthly/forcings/netflux_noHD/goa_hydro_",monthyear,".nc"), 
+             nc_name=paste0("../../outputs/2017/monthly/forcings/netflux_HD_1/goa_hydro_",monthyear,".nc"), 
              t_units, 
              seconds_timestep, 
              this_title, 
@@ -386,4 +341,18 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   
 }
 
-lapply(hydro_files,make_exchange_nc, fluxperts=T)
+lapply(hydro_files,make_exchange_nc, fluxperts=T, hyperdiff=1)
+
+# NOTE: for some reason the line
+
+# :parameters = "" ;
+
+# does not stick in the global attributes. Also, after this script we get monthly nc files. They can be concatenated with:
+# cdo mergetime *.nc goa_hydro_2017.nc
+# However, doing so causes the loss of line
+
+# t:dt = 43200. ;
+
+# For now the only way is to turn the merged file to cdf, add the missing lines, and turn back to .nc
+# Using cat instead of mergetime jumbles the time steps due to how we are naming the files/folders (TODO: fix this, although mergetime is safer in general)
+
