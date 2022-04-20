@@ -219,13 +219,17 @@ roms_dat_file_cleaner <- function(roms_file){
   # 1. Takes as arguments the ROMS-to-Atlantis outputs and whether they are state variables
   # 2. Builds a sequence of time steps from t0 (the first of the series whenever that would be) and going forward every 12 h
   # 3. fills the time series at each 12 h time step by box and depth layer (and face for the fluxes)
+  # 4. (added 4/20/2022) copies missing time steps at the extremities
   
   fill_time_steps_12h <- function(roms_data,statevars){
     
     ts <- unique((roms_data[,grep('Time',colnames(roms_data))]))
     
     if(length(ts)>1){ # if there is one data point (e.g. when testing), no need to interpolate
-      t_0 <- as.POSIXct(ts[1],origin='1900-01-01',tz='UTC') # this has to be specific to your ROMS, so check your origin and tz
+      
+      # this is to start from midnight of the first day of this month and this year, so we do ont miss values when interpolating
+      t_0 <- as.POSIXct(paste(unique(year(ts)), unique(month(ts)), 1, 00:00:00, sep = '-'), origin='1900-01-01', tz='UTC')
+      #t_0 <- as.POSIXct(ts[1],origin='1900-01-01',tz='UTC') # this has to be specific to your ROMS, so check your origin and tz
       t_end <- as.POSIXct(ts[length(ts)],origin='1900-01-01',tz='UTC')
       complete <- seq(from=t_0,to=t_end,by=60*60*12) # 12 hours is the target for HC, units from ts are in seconds
       
