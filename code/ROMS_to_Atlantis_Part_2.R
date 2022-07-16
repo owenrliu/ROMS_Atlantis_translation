@@ -24,10 +24,11 @@ library(lubridate)
 select <- dplyr::select
 
 # read data - consider that you may have a number of data input files - how does HC decide which came first? Merge them all together?
-file_statevars <- '../../outputs/2017/state_vars_test.dat'
-file_transport <- '../../outputs/2017/transport_test.dat'
+file_statevars <- '../../outputs/complete_from_Emily/Script1/2018/state_vars_test.dat'
+file_transport <- '../../outputs/complete_from_Emily/Script1/2018/transport_test.dat'
 
 roms_state_vars <- read.csv(file_statevars,sep='\t',header = T)
+roms_state_vars <- roms_state_vars %>% filter(Polygon.number >= 0)
 roms_hydro <- read.csv(file_transport,sep='\t',header = T)
 
 # read in BGM info
@@ -44,6 +45,11 @@ this_tz <- 'UTC'
 roms_state_vars <- roms_state_vars %>% mutate(Time.Step=as.POSIXct(Time.Step, origin=this_origin,tz=this_tz))
 roms_hydro <- roms_hydro %>% mutate(Time.Step..12.hr=as.POSIXct(Time.Step..12.hr, origin=this_origin,tz=this_tz))
 #############################################################
+# Create directories
+dir.create('../../outputs/complete_from_Emily/Script1/2018/monthly')
+dir.create('../../outputs/complete_from_Emily/Script1/2018/monthly/pre-interp')
+dir.create('../../outputs/complete_from_Emily/Script1/2018/monthly/post-interp')
+
 
 # Break down into monthly files
 state_var_files <- split((roms_state_vars %>% mutate(Month=month(Time.Step),
@@ -52,7 +58,7 @@ state_var_files <- split((roms_state_vars %>% mutate(Month=month(Time.Step),
               f = ~Monthyear)
 lapply(state_var_files, function(x) {
   x1 <- x %>% select(-Month,-Year,-Monthyear)
-  write.table(x1, file=paste0('../../outputs/2017/monthly/pre-interp/',x$Monthyear[1],'_statevars.dat'), quote=FALSE, row.names = FALSE, sep='\t')})
+  write.table(x1, file=paste0('../../outputs/complete_from_Emily/Script1/2018/monthly/pre-interp/',x$Monthyear[1],'_statevars.dat'), quote=FALSE, row.names = FALSE, sep='\t')})
 
 hydro_files <- split((roms_hydro %>% mutate(Month=month(Time.Step..12.hr),
                                                      Year=year(Time.Step..12.hr),
@@ -60,14 +66,14 @@ hydro_files <- split((roms_hydro %>% mutate(Month=month(Time.Step..12.hr),
                          f = ~Monthyear)
 lapply(hydro_files, function(x) {
   x1 <- x %>% select(-Month,-Year,-Monthyear)
-  write.table(x1, file=paste0('../../outputs/2017/monthly/pre-interp/',x$Monthyear[1],'_hydro.dat'), quote=FALSE, row.names = FALSE, sep='\t')})
+  write.table(x1, file=paste0('../../outputs/complete_from_Emily/Script1/2018/monthly/pre-interp/',x$Monthyear[1],'_hydro.dat'), quote=FALSE, row.names = FALSE, sep='\t')})
 
 #############################################################
 # Read in all monthly files at the same time - state variables and hydro
 # maqke the entire code below a function - for now containing the other function...
 # run that funtion on all files with lapply or purrr - use a flag for statevars or not
 
-roms_files <- list.files('../../outputs/2017/monthly/pre-interp/',full.names = TRUE)
+roms_files <- list.files('../../outputs/complete_from_Emily/Script1/2018/monthly/pre-interp',full.names = TRUE)
 
 # write one function that fills the empty boxes and creates data at every 12h
 
@@ -77,6 +83,33 @@ roms_dat_file_cleaner <- function(roms_file){
   roms_data[,which(grepl('Time',colnames(roms_data)))] <- as.POSIXct(roms_data[,which(grepl('Time',colnames(roms_data)))])
   
   if(grepl('statevars',roms_file)){ # if state variables, fill empty boxes
+    
+    #############################################################
+    # First, address broken time x box x layer combinations
+    # Sometimes, the code fails to produce all combinations timestep x box x layer
+    # It may be an issue with the original ROMS NetCDF files, it may be a glitch
+    # easiest solution is to identify these time steps and remove them. The code below should do the rest and fill the gaps by linear interpolation
+    # this seems to happen only with state variables for now
+    these_steps <- roms_data %>% pull(Time.Step) %>% unique() %>% sort() # time steps in this month
+    these_boxes <- roms_data %>% pull(Polygon.number) %>% unique() %>% sort() # polygons in the data (not all boxes necessarily)
+    these_layers <- 1:6 # 6 depth layers (this may change with other models)
+    
+    # These are all the combinations that should be present if the data was complete
+    template <- expand.grid(Time.Step = these_steps, Polygon.number = these_boxes, Layer = these_layers) %>%
+      group_by(Time.Step, Polygon.number) %>%
+      tally()
+    
+    # these are the combinations that are actually present
+    these_combinations <- roms_data %>% group_by(Time.Step, Polygon.number) %>% tally() # which boxes have lost layers??
+    
+    # these are the incomplete or missing time steps in the data based on the intersection between all possible combos and actual combos
+    missing_steps <- template %>% full_join(these_combinations, by = c('Time.Step','Polygon.number')) %>%
+      mutate(Check = n.x - n.y) %>%
+      filter(Check > 0) %>%
+      pull(Time.Step)
+    
+    # remove these time steps from the roms_data
+    roms_data <- roms_data %>% filter(!Time.Step %in% missing_steps)
     
     #############################################################
     # This section addresses issues generated by the way that data are generate din the R code, which was all to comply with HC
@@ -322,14 +355,14 @@ roms_dat_file_cleaner <- function(roms_file){
     #colnames(roms_data_interp) <- c(colnames(read.csv(file_statevars,sep='\t',check.names = FALSE)),"layer")
     #export
     monthyear <- paste(month(roms_data_interp$Time.Step[1]),year(roms_data_interp$Time.Step[1]),sep = '_')
-    write.table(roms_data_interp, paste0('../../outputs/2017/monthly/post-interp/',monthyear,'_avg.dat'),
+    write.table(roms_data_interp, paste0('../../outputs/complete_from_Emily/Script1/2018/monthly/post-interp/',monthyear,'_avg.dat'),
                 quote=FALSE, row.names = FALSE, sep = '\t')
   } else {
     roms_data_interp <- fill_time_steps_12h(roms_data = roms_data,statevars = FALSE)
     #colnames(roms_data_interp) <- colnames(read.csv(file_transport,sep='\t',check.names = FALSE))
     #export
     monthyear <- paste(month(roms_data_interp$Time.Step..12.hr[1]),year(roms_data_interp$Time.Step..12.hr[1]),sep = '_')
-    write.table(roms_data_interp, paste0('../../outputs/2017/monthly/post-interp/',monthyear,'_flux.dat'),
+    write.table(roms_data_interp, paste0('../../outputs/complete_from_Emily/Script1/2018/monthly/post-interp/',monthyear,'_flux.dat'),
                 quote=FALSE, row.names = FALSE, sep = '\t')
     
   }
