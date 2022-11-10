@@ -23,6 +23,16 @@
 # Flip the sign of the horizontal fluxes, and map the vertical exchanges accordingly. 
 # Mark every change related to this with 11/04/2021, in case we need to find this again and change
 
+# NOTE 11/08/2022
+# Added new option to correct for hyperdiffusion
+# Now setting hyperdiff=2 in the function calls divides the flux across each face by the length across the box that receives the flux
+# This accounts for box shape when scaling the fluxes
+# in addition, vertical fluxes are divided by the dz of the layer that receives the flux, following the same logic
+# This will cause fluxes of larger magnitude across the board
+# proportions across fluxes will also be different now, especially in long and skinnny boxes
+# this may result in overall different patterns of circulation and is not equivalent to scaling all fluxes the same way across the board
+# check that the dominant fluxes are still E-W. This may no longer be the case for long boxes oriented E-W
+
 library(tidyverse)
 library(rbgm)
 library(tidync)
@@ -35,16 +45,24 @@ select <- dplyr::select
 # Read data
 #make lists of the avg and hydro files, post-interpolation
 
-roms_files <- list.files('../../outputs/2017/monthly/post-interp/',full.names = TRUE)
+roms_files <- list.files('../../outputs/complete_from_Emily/Script1/2017/monthly/post-interp/',full.names = TRUE)
 hydro_files <- roms_files[grepl('flux',roms_files)]
 avg_files <- roms_files[grepl('avg',roms_files)]
 
 # read in depth lookup key
-depth_key <- read.csv('../../outputs/2017/depth_layer.csv') # TODO: bypass this
+depth_key <- read.csv('../../outputs/complete_from_Emily/Script1/2017/depth_layer.csv') # TODO: bypass this
 
 # read in bgm
 atlantis_bgm <- read_bgm('C:/Users/Alberto Rovellini/Documents/GOA/ROMS/data/atlantis/GOA_WGS84_V4_final.bgm')
 atlantis_box <- atlantis_bgm %>% box_sf()
+
+# read in hyperdiffusion correction table
+hd_by_length <- read.csv('hd_by_length.csv')
+
+# # make folder
+# dir.create('../../outputs/complete_from_Emily/Script1/2017/monthly/forcings')
+# dir.create('../../outputs/complete_from_Emily/Script1/2017/monthly/forcings/hydro')
+
 
 #Extract faces of each polygon from Atlantis and organize them
 # information about each face, including its angular coords, and which boxes are to its left and right
@@ -53,7 +71,7 @@ faces <- atlantis_bgm$faces %>% select(-label)
 # function to apply the whole routine
 # TODO: move functions to a different file
 
-make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=faces, depth=depth_key, fluxperts=F, hyperdiff=0){
+make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=faces, depth=depth_key, fluxperts=F, hyperdiff=0, hd=hd_by_length){
   
   monthyear <- sub('.*post-interp/ *(.*?) *_flux.*','\\1',hydro_file) # get the month-year index
   
@@ -122,6 +140,20 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
     select(-data) %>%
     unnest(cols = OneFlux)
   
+  # update 11/08/2022
+  # adding option to divide by section of the receiving box for horizontal fluxes, or by dz for vertical fluxes
+  # remember that layer 0 is the bottom
+  # this will result in far larger fluxes, but directions should be the same
+  # if you want to do it by face you need to do it here, before integrating fluxes across faces into source/destination boxes
+  if(hyperdiff==2){
+    hydro_one_flux <- hydro_one_flux %>%
+      left_join(hd, by = c('FaceID'='.fx0')) %>%
+      rowwise() %>%
+      mutate(Flux..m3.s. = ifelse(adjacent.box==rbox, Flux..m3.s./distances_r, Flux..m3.s./distances_l)) %>%
+      ungroup() %>%
+      select(-(rbox:distances_l))
+  }
+  
   ## Horizontal fluxes
   # sum up fluxes bewteen the same source and destination but across different faces
   dest_b_horizontal <- hydro_one_flux %>% 
@@ -166,6 +198,20 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
            exchange = -1*lead(exchange_vert,default=0)) %>% # 11/04/2021 these are all flows from focal box to box above. A negative value means an upward flux in ROMS, which means a positive flux from the focal cell ("give"); 
     select(-exchange_vert)
   
+  # 11/08/2022 correcting for hyperdiffusion
+  # for vertical fluxes we divide by dz. Note that this will cause the system to have proportionally stronger vertical fluxes than horizontal ones
+  if(hyperdiff==2){
+    dest_vertical <- dest_vertical %>%
+      left_join(depth_all %>% select(box_id, layer, dz), by = c('source_b'='box_id', 'source_k'='layer')) %>% # source_b and dest_b are the same box for vertical flows
+      left_join(depth_all %>% select(box_id, layer, dz), by = c('source_b'='box_id', 'dest_k'='layer')) %>%
+      rename(dz_source = dz.x, dz_dest = dz.y) %>%
+      mutate(exchange = case_when(is.na(exchange) ~ exchange,
+                                  exchange == 0 ~ 0,
+                                  exchange > 0 ~ exchange / dz_dest,
+                                  exchange < 0 ~ exchange / dz_source)) %>%
+      select(-dz_source, -dz_dest)
+  }
+  
   ## Flows from outside the model domain through the bottom of Atlantis
   bottom_flows <- vert %>% filter(layer==0) # fluxes through the bottom of all 0 layers (deepest in each box)
   
@@ -177,6 +223,20 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
     mutate(dest_b = 0, dest_k = 0) %>%
     select(Time.Step,Polygon.number,layer,dest_b,dest_k,Vertical.velocity..m3.s.) %>%
     set_names(c('ts','source_b','source_k','dest_b','dest_k','exchange'))
+  
+  # 11/08/2022 correction for hyperdiffusion
+  # dividing by 46 m if the flux enters box 0 layer 0, else by the receiving dz
+  if(hyperdiff == 2){
+    dest_bottom <- dest_bottom %>%
+      left_join(depth_all %>% select(box_id, layer, dz), by = c('source_b'='box_id', 'source_k'='layer')) %>%
+      rename(dz_source = dz) %>%
+      mutate(dz_dest = 46) %>% # because layer 0 of box 0 is 46 m
+      mutate(exchange = case_when(is.na(exchange) ~ exchange,
+                                  exchange == 0 ~ 0,
+                                  exchange > 0 ~ exchange / dz_source,
+                                  exchange < 0 ~ exchange / dz_dest)) %>%
+      select(-dz_source, -dz_dest)
+  }
   
   #####################################################################################
   ## Bring it all together
@@ -199,8 +259,14 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
         ungroup() %>%
         select(-area_source,-area_dest)
         
+    } else if(hyperdiff==2) {
+      
+      print('Hyperdiffusion correction done on individual faces')
+      
     } else {
+      
       stop('This method of hyperdiffusion correction has not been implemented yet')
+      
     }
   }
   
@@ -326,7 +392,7 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   }
   
   make_hydro("exchange", 
-             nc_name=paste0("../../outputs/2017/monthly/forcings/netflux_HD_1/goa_hydro_",monthyear,".nc"), 
+             nc_name=paste0("../../outputs/complete_from_Emily/Script1/2017/monthly/forcings/hydro_hdNov2022/goa_hydro_",monthyear,".nc"), 
              t_units, 
              seconds_timestep, 
              this_title, 
@@ -341,7 +407,7 @@ make_exchange_nc <- function(hydro_file, atlantis_sf=atlantis_box, faces_tmp=fac
   
 }
 
-lapply(hydro_files,make_exchange_nc, fluxperts=T, hyperdiff=1)
+lapply(hydro_files, make_exchange_nc, fluxperts=T, hyperdiff=2)
 
 # NOTE: for some reason the line
 
